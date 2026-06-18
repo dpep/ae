@@ -110,6 +110,21 @@ fn learning_persists_across_invocations_via_shared_db() {
 }
 
 #[test]
+fn model_flag_is_accepted_and_degrades_gracefully() {
+    let sock = scratch_socket("model");
+    // A bogus model path must not break the run — it falls back to the hash
+    // embedder, and expansion (trie + dictionary) is unaffected.
+    let out = run(
+        &sock,
+        &["--model", "/no/such/model", "--format", "json"],
+        Some("Check the OKR board."),
+    );
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["expansions"][0]["acronym"], "OKR");
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));

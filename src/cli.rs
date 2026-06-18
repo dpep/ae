@@ -34,6 +34,11 @@ pub struct Cli {
     #[arg(long, default_value = "/tmp/ae.sock")]
     pub socket: PathBuf,
 
+    /// Embedding model: a path (directory or `.onnx` file) or a name resolved
+    /// against the model search dirs. Defaults to the bundled/cached model.
+    #[arg(short, long)]
+    pub model: Option<String>,
+
     /// Emit engine telemetry to stderr.
     #[arg(short, long)]
     pub verbose: bool,
@@ -57,7 +62,7 @@ pub fn run() -> ExitCode {
 
     // Internal Leader process: serve until stopped, then exit.
     if cli.serve {
-        return match ipc::serve(&cli.socket) {
+        return match ipc::serve(&cli.socket, cli.model.as_deref()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 log::error!("server error: {e}");
@@ -81,7 +86,7 @@ pub fn run() -> ExitCode {
     }
 
     if cli.daemon {
-        return match ipc::start_daemon(&cli.socket) {
+        return match ipc::start_daemon(&cli.socket, cli.model.as_deref()) {
             Ok(ipc::DaemonOutcome::Started) => {
                 println!("ae: daemon started on {}", cli.socket.display());
                 ExitCode::SUCCESS
@@ -122,7 +127,7 @@ pub fn run() -> ExitCode {
 
 /// The self-healing fallback: open the shared persistent engine and evaluate.
 fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::AnalysisPayload> {
-    let engine = Engine::open(&ipc::db_path(&cli.socket))?;
+    let engine = Engine::open(&ipc::db_path(&cli.socket), cli.model.as_deref())?;
     engine.analyze(text)
 }
 

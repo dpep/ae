@@ -1,23 +1,44 @@
-//! Text embedding behind a trait so the heavy model is optional.
+//! Text embedding behind a trait, with two implementations.
 //!
-//! The spec calls for a local ONNX model (`nomic-embed-text-v1.5`) producing
-//! 384-d embeddings. That model is a large binary asset and the runtime is a
-//! heavy native dependency, neither of which fits the "lightweight, runs in a
-//! clean checkout" goal — so it's deferred behind a future `onnx` feature.
+//! [`OnnxEmbedder`] runs the real `all-MiniLM-L6-v2` model (int8-quantized
+//! ONNX, fetched at build time — see `build.rs`) via ONNX Runtime. It's the
+//! default when the model is present. [`HashEmbedder`] is a deterministic,
+//! dependency-free feature-hash fallback used when the model can't be loaded
+//! (offline build, missing asset) and in unit tests that need reproducibility.
 //!
-//! The default [`HashEmbedder`] is a deterministic feature-hash that produces a
-//! real [`EMBED_DIMS`]-d vector from text: similar token sets yield similar
-//! vectors, with no model file and no network. That keeps the whole MRL
-//! pipeline (truncate → normalize → cosine) genuine and testable. A real model
-//! implements the same [`Embedder`] trait, so callers never change.
+//! Both yield a native-width vector that the MRL pipeline truncates to 64 dims;
+//! the trait deliberately does *not* fix the width, since the implementations
+//! happen to agree here ([`EMBED_DIMS`] = 384) but needn't. [`default_embedder`]
+//! picks the best available at runtime, so callers never branch on which one
+//! they got.
 
-/// Native embedding width before MRL compression (matches the target model).
+mod onnx;
+
+pub use onnx::OnnxEmbedder;
+
+/// Native width of the [`HashEmbedder`] fallback. The MRL stage only needs at
+/// least [`crate::mrl::MRL_DIMS`] coordinates, so embedders may differ in width.
 pub const EMBED_DIMS: usize = 384;
 
-/// Produces a fixed-width embedding for a chunk of text.
+/// Produces an embedding (length ≥ [`crate::mrl::MRL_DIMS`]) for a chunk of text.
 pub trait Embedder: Send + Sync {
-    /// Returns an [`EMBED_DIMS`]-length vector.
     fn embed(&self, text: &str) -> Vec<f32>;
+}
+
+/// The best embedder available: the ONNX model if it loads, else the hash
+/// fallback. `model` is an optional `--model` request (path or name). Logs
+/// which embedder was selected.
+pub fn default_embedder(model: Option<&str>) -> Box<dyn Embedder> {
+    match OnnxEmbedder::load(model) {
+        Some(e) => {
+            log::info!("using ONNX embedder ({} dims)", e.dims());
+            Box::new(e)
+        }
+        None => {
+            log::debug!("ONNX model unavailable; using hash embedder");
+            Box::new(HashEmbedder::new())
+        }
+    }
 }
 
 /// Deterministic, dependency-free embedder via signed feature hashing over

@@ -45,9 +45,15 @@ commit.
 
 - [x] thread-safe `SharedTrie` (`RwLock<TrieNode>`); insert / contains / collect
 - [x] dual-pipeline payload types (`MatchCandidate` … `AnalysisPayload`)
-- [x] `Embedder` trait; deterministic `HashEmbedder` default (see deviation)
-- [~] real ONNX (`nomic-embed-text-v1.5`) embedder — feature-gated, future work
-- [x] tests: trie insert/scan, embedding determinism + dimensionality
+- [x] `Embedder` trait; deterministic `HashEmbedder` fallback
+- [x] real ONNX embedder (`all-MiniLM-L6-v2`, int8-quantized) via ONNX Runtime —
+      tokenize → mean-pool → MRL-compress; statically linked
+- [x] model fetched at build time into a reused user cache (`build.rs`), never
+      committed; `bundled-model` feature bakes it into one self-contained binary
+      (default), or load externally with `--no-default-features`
+- [x] `--model <path|name>` override; resolution order, named search dirs
+- [x] tests: trie insert/scan, mean-pool, model resolution, real-model semantic
+      similarity (gated on model presence)
 
 ## Milestone 5 — rule-based learning + fallback routing
 
@@ -60,33 +66,42 @@ commit.
 
 ## Deviations from the spec (with rationale)
 
-1. **Embedding inference is behind an `Embedder` trait, default `HashEmbedder`.**
-   The spec's `ort` (ONNX Runtime) + `tokenizers` path needs a ~hundreds-of-MB
-   model file that can't ship in a clean checkout or CI, and the heavy native
-   deps fight the "ultra-lightweight, zero-dependency" goal. The default
-   embedder is a deterministic feature-hash that produces a real 384-d vector,
-   so the *entire* MRL pipeline (truncate → normalize → store → cosine) is
-   genuine and tested. A real ONNX embedder can be added behind a `onnx`
-   feature flag without touching callers. Tracked as the one `[~]` above.
+1. **Model is `all-MiniLM-L6-v2`, not `nomic-embed-text-v1.5`.** The spec names
+   nomic (768-d, MRL-trained) but also says "384-dimensional" — a contradiction.
+   We started on nomic (worked end-to-end) then switched to all-MiniLM-L6-v2:
+   its int8 export is ~22 MB vs nomic's ~130 MB, same BERT inference path
+   (input_ids/attention_mask/token_type_ids → mean-pool), 384-d native. It isn't
+   MRL-trained, so 384→64 truncation loses a bit more than nomic's would; fine
+   for acronym-context disambiguation, and `MRL_DIMS` can rise to 128 to recover
+   most of it. The `Embedder` trait makes the model swappable; `--model`
+   overrides at runtime. `HashEmbedder` remains the deterministic offline/test
+   fallback.
 
-2. **Vectors live in a plain `acronym_contexts` table, not a `vec0` virtual
+2. **"Quantize and shrink" = fetch the upstream int8 export.** Running a real
+   quantizer at build time needs Python's onnxruntime tooling, which we won't
+   add as a build dependency. Downloading the already-quantized artifact gives
+   the same size win without it.
+
+3. **Vectors live in a plain `acronym_contexts` table, not a `vec0` virtual
    table.** `sqlite-vec`'s `vec0` needs a loadable extension that `rusqlite`'s
    bundled SQLite doesn't carry. At this corpus size cosine in Rust over the
    candidate set is simpler and fast. Swapping in `vec0` later is a storage-layer
    change behind the same API.
 
-3. **`--stop` and the janitor.** `--stop` connects and sends a shutdown frame;
+4. **`--stop` and the janitor.** `--stop` connects and sends a shutdown frame;
    the janitor is an idle-timeout watchdog thread. The spec's "stdio
    disconnect" trigger is approximated by an idle-connection timeout, which is
    the portable, testable equivalent.
 
 ## Feature requests / backlog
 
-- [ ] Real ONNX embedder behind `--features onnx` (model path via env).
 - [ ] `vec0` virtual-table storage when `sqlite-vec` is available.
+- [ ] Bump `MRL_DIMS` to 128 (better disambiguation for the non-MRL model).
 - [ ] `ae --add ACR "Expansion"` to seed the dictionary from the CLI.
 - [ ] `ndjson` streaming for multi-line piped input (one payload per line).
 - [ ] Confidence calibration for learned candidates from real corpora.
+- [ ] Homebrew: validate the formula's ONNX-Runtime + bundled-model build on a
+      clean machine (sandbox network constraints).
 
 ## Known bugs
 

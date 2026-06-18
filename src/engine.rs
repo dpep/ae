@@ -33,11 +33,13 @@ impl Engine {
     }
 
     /// A persistent engine backed by the database at `path`, seeded with the
-    /// built-in dictionary on first use.
-    pub fn open(path: &std::path::Path) -> rusqlite::Result<Self> {
+    /// built-in dictionary on first use. `model` is an optional `--model`
+    /// request; otherwise the best available embedder is chosen (see
+    /// [`crate::embed::default_embedder`]).
+    pub fn open(path: &std::path::Path, model: Option<&str>) -> rusqlite::Result<Self> {
         let store = Store::open(path)?;
         store.seed_defaults()?;
-        Self::new(store, Box::new(HashEmbedder::new()))
+        Self::new(store, crate::embed::default_embedder(model))
     }
 
     /// An ephemeral in-memory engine seeded with the built-in dictionary — the

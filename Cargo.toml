@@ -22,3 +22,13 @@ env_logger = "0.11"
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+
+[features]
+# Bake the embedding model into the binary (one self-contained file). On by
+# default for release/install/brew; turn off for dev/test to load the model
+# externally from the build-time cache (smaller, faster-compiling binaries):
+#   cargo build --no-default-features
+default = ["bundled-model"]
+bundled-model = []

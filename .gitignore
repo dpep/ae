@@ -1,4 +1,6 @@
 /target
+/models
+*.onnx
 **/*.rs.bk
 *.db
 *.sqlite

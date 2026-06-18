@@ -30,10 +30,17 @@ cleans itself up.
 ## Install
 
 ```sh
-make install          # cargo install --path . → ~/.cargo/bin/ae
+make install          # cargo install --path . → ~/.cargo/bin/ae  (one self-contained binary)
 # or
 cargo build --release # → target/release/ae
 ```
+
+The embedding model is fetched once at build time into a user cache (`~/.cache/ae`,
+reused across rebuilds — never committed). Release/install builds **bake it into
+the binary** so `ae` ships as a single self-contained file; dev/test builds load
+it externally for faster compiles (`make build` / `make test`, i.e.
+`--no-default-features`). Offline builds still work — they fall back to a
+deterministic hash embedder.
 
 ## Usage
 
@@ -42,14 +49,21 @@ ae [TEXT] [OPTIONS]
 
   TEXT                 text to scan; optional when piping via stdin
   -f, --format <FMT>   human | json | ndjson        [default: human]
+  -m, --model <SPEC>   embedding model: a path (dir or .onnx) or a name
   -d, --daemon         start a detached background leader
-  -s, --stop           stop the running background leader
+      --stop           stop the running background leader
       --socket <PATH>  UDS path                      [default: /tmp/ae.sock]
   -v, --verbose        engine telemetry to stderr
 ```
 
 stdin (when piped) wins; otherwise the positional `TEXT` is used. stdout carries
 only data — all logs go to stderr, so `ae … | jq` is always safe.
+
+`--model` lets you point at any compatible model — an absolute/relative path to a
+model directory or `.onnx` file, or a bare name resolved against the model search
+dirs (`$AE_MODELS_DIR`, the user cache, `<bin>/../share/ae/models`). With no
+flag, `ae` uses the bundled (or cached) model, and falls back to the hash
+embedder if none loads.
 
 ## How it works
 
@@ -61,13 +75,13 @@ evaluation = STAGE 1 expansion (trie scan → dictionary → 64-d MRL vector mat
            + STAGE 2 learning  (rule-based extraction of inline definitions)
 ```
 
-Embeddings are compressed with **Matryoshka Representation Learning**: a 384-d
-vector is truncated to its first 64 coordinates and L2-normalized, shrinking the
-vector store ~6× while keeping most of the semantic signal. See
+Embeddings come from **all-MiniLM-L6-v2** (int8-quantized ONNX) run locally via
+ONNX Runtime — tokenize, mean-pool, then compress with **Matryoshka
+Representation Learning**: the 384-d vector is truncated to its first 64
+coordinates and L2-normalized, shrinking the vector store ~6×. See
 [docs/SPEC.md](docs/SPEC.md) for the full design and
-[docs/ROADMAP.md](docs/ROADMAP.md) for status and deliberate deviations (notably:
-the default embedder is a deterministic hash so nothing has to download a model;
-real ONNX inference is feature-gated future work).
+[docs/ROADMAP.md](docs/ROADMAP.md) for status and deliberate deviations (notably
+the model choice and the build-time fetch-and-bundle strategy).
 
 ## Development
 

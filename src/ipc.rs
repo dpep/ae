@@ -112,17 +112,19 @@ pub fn stop(socket: &Path) -> io::Result<bool> {
 }
 
 /// Spawn a detached daemon process for `socket`, waiting until it accepts
-/// connections. A no-op (`AlreadyRunning`) if one is already up.
-pub fn start_daemon(socket: &Path) -> io::Result<DaemonOutcome> {
+/// connections. A no-op (`AlreadyRunning`) if one is already up. `model`
+/// forwards an explicit `--model` request to the daemon.
+pub fn start_daemon(socket: &Path, model: Option<&str>) -> io::Result<DaemonOutcome> {
     if UnixStream::connect(socket).is_ok() {
         return Ok(DaemonOutcome::AlreadyRunning);
     }
     let exe = std::env::current_exe()?;
-    std::process::Command::new(exe)
-        .arg("--__serve")
-        .arg("--socket")
-        .arg(socket)
-        .stdin(std::process::Stdio::null())
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--__serve").arg("--socket").arg(socket);
+    if let Some(model) = model {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
@@ -145,7 +147,7 @@ pub fn start_daemon(socket: &Path) -> io::Result<DaemonOutcome> {
 /// Run the Leader: take the exclusive lock, bind the socket, and serve until
 /// told to stop or the janitor times out. Returns early (without error) if the
 /// lock is already held — another Leader won the election.
-pub fn serve(socket: &Path) -> io::Result<()> {
+pub fn serve(socket: &Path, model: Option<&str>) -> io::Result<()> {
     let lock_file = File::create(lock_path(socket))?;
     if lock_file.try_lock_exclusive().is_err() {
         log::info!("another leader holds the lock; exiting");
@@ -158,7 +160,9 @@ pub fn serve(socket: &Path) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     log::info!("leader listening on {}", socket.display());
 
-    let engine = Arc::new(Mutex::new(Engine::open(&db_path(socket)).map_err(to_io)?));
+    let engine = Arc::new(Mutex::new(
+        Engine::open(&db_path(socket), model).map_err(to_io)?,
+    ));
     let active = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
 

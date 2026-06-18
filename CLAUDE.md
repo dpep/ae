@@ -25,7 +25,15 @@ why anything deviates from the spec.
 ## Language and toolchain
 
 Rust, single static binary. `rusqlite` (bundled SQLite, WAL) for storage,
-`clap` for the CLI, `regex` for the learning patterns, `fs2` for the file lock.
+`clap` for the CLI, `regex` for the learning patterns, `fs2` for the file lock,
+`ort` (ONNX Runtime, statically linked) + `tokenizers` for embeddings.
+
+The embedding model (`all-MiniLM-L6-v2`, int8-quantized ONNX) is **not in the
+repo** — `build.rs` fetches it at build time into `~/.cache/ae` (reused across
+builds). The default `bundled-model` feature bakes it into the binary (one
+self-contained file); `--no-default-features` loads it externally from the cache
+(dev/test — faster compiles). Offline builds fall back to the deterministic
+`HashEmbedder`. Never commit a model artifact (`.gitignore` blocks `*.onnx`).
 
 This machine's Rust came via Homebrew's keg-only `rustup`, so `cargo` may not be
 on `PATH`. Either add it once —
@@ -41,6 +49,7 @@ echo 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"' >> ~/.bash_profile
 ```text
 ae/
   Cargo.toml
+  build.rs       ← fetch/cache + (optionally) stage the embedding model
   src/
     main.rs      ← thin entry → cli::run()
     lib.rs       ← module wiring
@@ -49,7 +58,8 @@ ae/
     mrl.rs       ← Matryoshka truncate + L2 normalize + cosine
     trie.rs      ← thread-safe prefix tree
     store.rs     ← SQLite schema, dictionary, vector store
-    embed.rs     ← Embedder trait + deterministic HashEmbedder
+    embed.rs     ← Embedder trait, HashEmbedder, default_embedder
+    embed/onnx.rs← OnnxEmbedder: model resolution, inference, mean-pool
     learn.rs     ← rule-based acronym/definition extraction
     engine.rs    ← in-process evaluation (expansion + learning)
     ipc.rs       ← lock, Leader server, Follower proxy, daemon, janitor
@@ -62,14 +72,19 @@ Keep it a single crate until there's a concrete reason to split.
 ## Building, testing, linting
 
 ```sh
-cargo build                 # dev build → target/debug/ae
+make build                  # dev build (external model) → target/debug/ae
 cargo run -- "KPI (Key Performance Indicator)"
-cargo test                  # unit + integration tests
-cargo clippy --all-targets  # lint — keep it clean
+make test                   # unit + integration tests (external model)
+make lint                   # fmt --check + clippy (warnings = errors)
 cargo fmt                    # format — run before committing
 ```
 
-Before committing: `cargo fmt && cargo clippy --all-targets && cargo test`.
+Dev/test use `--no-default-features` (external model) for speed — prefer the
+`make` targets, which set it. CI lints/tests in external mode and also does a
+bundled `--release` build to prove the single-binary path compiles.
+
+Before committing: `cargo fmt && cargo clippy --all-targets --no-default-features
+-- -D warnings && cargo test --no-default-features`.
 
 ## Testing conventions
 
