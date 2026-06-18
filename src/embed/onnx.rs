@@ -3,10 +3,13 @@
 //!
 //! The model and tokenizer are loaded from bytes — either baked into the binary
 //! (default `bundled-model` feature → one self-contained file) or read from
-//! disk (dev/test, or an explicit `--model`). Resolution order when no explicit
-//! model is requested: `$AE_MODEL_DIR` (runtime override) → bundled bytes →
-//! the build-time cache path. If nothing loads, callers use the hash fallback
-//! (see [`super::default_embedder`]).
+//! disk (dev/test, an explicit `--model`, or a packaged install). Resolution
+//! order when no explicit model is requested: `$AE_MODEL_DIR` → bundled bytes →
+//! the build-time cache path → the standard model found by name under the search
+//! dirs (e.g. Homebrew's `share/ae/models`). If nothing loads, callers use the
+//! hash fallback (see [`super::default_embedder`]). ONNX Runtime is statically
+//! linked by default, or `dlopen`ed at runtime under the `ort-load-dynamic`
+//! feature (Homebrew) — see [`ensure_ort_dylib`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,6 +25,9 @@ use super::Embedder;
 const NATIVE_DIMS: usize = 384;
 /// Cap sequence length — short jargon phrases never need the full context.
 const MAX_SEQ: usize = 256;
+/// The model `ae` looks for by name when nothing else is configured (matches
+/// `build.rs` and the Homebrew install dir).
+const DEFAULT_MODEL_NAME: &str = "all-MiniLM-L6-v2-quantized";
 
 #[cfg(feature = "bundled-model")]
 const BUNDLED_MODEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/model.onnx"));
@@ -39,6 +45,8 @@ impl OnnxEmbedder {
     /// resolved against the model search dirs. Returns `None` (→ hash fallback)
     /// if nothing usable loads.
     pub fn load(spec: Option<&str>) -> Option<Self> {
+        ensure_ort_dylib();
+
         if let Some(spec) = spec {
             return match resolve(spec).and_then(|(m, t)| Self::from_files(&m, &t)) {
                 Some(e) => Some(e),
@@ -49,7 +57,8 @@ impl OnnxEmbedder {
             };
         }
 
-        // No explicit request: runtime override → bundled → build-time cache.
+        // No explicit request — resolve in order of specificity:
+        //   $AE_MODEL_DIR → bundled bytes → build-time cache → installed default.
         if let Some(dir) = std::env::var_os("AE_MODEL_DIR") {
             let dir = PathBuf::from(dir);
             return Self::from_files(&dir.join("model.onnx"), &dir.join("tokenizer.json"));
@@ -57,8 +66,18 @@ impl OnnxEmbedder {
         if let Some(e) = bundled() {
             return Some(e);
         }
-        let baked = PathBuf::from(option_env!("AE_MODEL_DIR")?);
-        Self::from_files(&baked.join("model.onnx"), &baked.join("tokenizer.json"))
+        if let Some(baked) = option_env!("AE_MODEL_DIR") {
+            let baked = PathBuf::from(baked);
+            if let Some(e) =
+                Self::from_files(&baked.join("model.onnx"), &baked.join("tokenizer.json"))
+            {
+                return Some(e);
+            }
+        }
+        // Sane default: the standard model, installed under a known search dir
+        // (e.g. Homebrew's `share/ae/models/<name>`).
+        let (model, tokenizer) = find_named(DEFAULT_MODEL_NAME)?;
+        Self::from_files(&model, &tokenizer)
     }
 
     fn from_files(model: &Path, tokenizer: &Path) -> Option<Self> {
@@ -171,13 +190,60 @@ fn resolve(spec: &str) -> Option<(PathBuf, PathBuf)> {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         return Some((path.to_path_buf(), dir.join("tokenizer.json")));
     }
+    find_named(spec)
+}
+
+/// Look up a model by `name` under the search dirs, returning its
+/// `(model.onnx, tokenizer.json)` if found.
+fn find_named(name: &str) -> Option<(PathBuf, PathBuf)> {
     for base in search_dirs() {
-        let dir = base.join(spec);
-        if dir.join("model.onnx").is_file() && dir.join("tokenizer.json").is_file() {
+        let dir = base.join(name);
+        if has_model(&dir) {
             return Some((dir.join("model.onnx"), dir.join("tokenizer.json")));
         }
     }
     None
+}
+
+/// True if `dir` holds both a model and a tokenizer.
+fn has_model(dir: &Path) -> bool {
+    dir.join("model.onnx").is_file() && dir.join("tokenizer.json").is_file()
+}
+
+/// Under the load-dynamic strategy, ONNX Runtime is `dlopen`ed at runtime from
+/// `ORT_DYLIB_PATH`. If it isn't set, probe the usual install locations (the
+/// Homebrew keg in particular) so a packaged `ae` works with no env setup. A
+/// no-op for the static (download-binaries) build.
+fn ensure_ort_dylib() {
+    #[cfg(feature = "ort-load-dynamic")]
+    {
+        if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+            return;
+        }
+        let lib = if cfg!(target_os = "macos") {
+            "libonnxruntime.dylib"
+        } else {
+            "libonnxruntime.so"
+        };
+        let mut bases: Vec<PathBuf> = Vec::new();
+        if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX") {
+            let prefix = PathBuf::from(prefix);
+            bases.push(prefix.join("opt/onnxruntime/lib"));
+            bases.push(prefix.join("lib"));
+        }
+        for p in [
+            "/opt/homebrew/opt/onnxruntime/lib",
+            "/opt/homebrew/lib",
+            "/usr/local/lib",
+            "/usr/lib",
+        ] {
+            bases.push(PathBuf::from(p));
+        }
+        if let Some(dir) = bases.into_iter().find(|d| d.join(lib).is_file()) {
+            // SAFETY: called once at embedder load, before any ORT use.
+            unsafe { std::env::set_var("ORT_DYLIB_PATH", dir.join(lib)) };
+        }
+    }
 }
 
 /// Directories searched for a named model, in order: `$AE_MODELS_DIR`, the user

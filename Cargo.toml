@@ -22,13 +22,25 @@ env_logger = "0.11"
 fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
-ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.12", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [features]
-# Bake the embedding model into the binary (one self-contained file). On by
-# default for release/install/brew; turn off for dev/test to load the model
-# externally from the build-time cache (smaller, faster-compiling binaries):
-#   cargo build --no-default-features
-default = ["bundled-model"]
+# Default: bundle the model into one self-contained binary, and statically link
+# a downloaded ONNX Runtime (zero-config dev/release).
+default = ["bundled-model", "ort-download"]
+
+# Bake the embedding model into the binary. Turn off (`--no-default-features
+# --features ort-download`) to load it externally from the build-time cache —
+# smaller, faster-compiling dev/test binaries.
 bundled-model = []
+
+# ONNX Runtime loading strategy (pick exactly one):
+#   ort-download     — download + statically link a prebuilt ORT at build time
+#   ort-load-dynamic — dlopen ORT at runtime (ORT_DYLIB_PATH); used by Homebrew,
+#                      which links the keg's libonnxruntime instead of fetching
+ort-download = [
+  "ort/std", "ort/ndarray", "ort/tracing",
+  "ort/download-binaries", "ort/tls-native", "ort/copy-dylibs", "ort/api-24",
+]
+ort-load-dynamic = ["ort/std", "ort/ndarray", "ort/tracing", "ort/load-dynamic", "ort/api-24"]

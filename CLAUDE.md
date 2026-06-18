@@ -90,12 +90,16 @@ make lint                   # fmt --check + clippy (warnings = errors)
 cargo fmt                    # format — run before committing
 ```
 
-Dev/test use `--no-default-features` (external model) for speed — prefer the
-`make` targets, which set it. CI lints/tests in external mode and also does a
-bundled `--release` build to prove the single-binary path compiles.
+Dev/test use `--no-default-features --features ort-download` (external model,
+still a statically-linked downloaded ONNX Runtime) for speed — prefer the `make`
+targets, which set it. The default build also bundles the model; Homebrew builds
+with `--features ort-load-dynamic` (dlopen the keg's ORT at runtime). CI lints/
+tests in dev mode and does a bundled `--release` build to prove the single-binary
+path compiles.
 
 Before committing: `cargo fmt && cargo clippy --all-targets --no-default-features
--- -D warnings && cargo test --no-default-features`.
+--features ort-download -- -D warnings && cargo test --no-default-features
+--features ort-download`.
 
 ## Testing conventions
 

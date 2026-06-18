@@ -40,12 +40,12 @@ jobs:
       - name: fmt
         run: cargo fmt --check
 
-      # Lint + test in external (non-bundled) mode — fast, small test binaries.
+      # Lint + test in external-model mode (still static ORT) — fast, small.
       - name: clippy
-        run: cargo clippy --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --features ort-download -- -D warnings
 
       - name: test
-        run: cargo test --no-default-features
+        run: cargo test --no-default-features --features ort-download
 
       # Prove the single self-contained binary (model bundled in) compiles.
       - name: release build (bundled model)

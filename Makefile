@@ -22,7 +22,9 @@
 
 CARGO ?= cargo
 BIN   := ae
-DEV   := --no-default-features
+# Dev/test: external model (faster compiles) but still statically link a
+# downloaded ONNX Runtime so it runs with zero setup.
+DEV   := --no-default-features --features ort-download
 
 .DEFAULT_GOAL := help
 .PHONY: help build release install uninstall test model lint fmt clean
