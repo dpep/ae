@@ -345,22 +345,37 @@ impl Store {
 
     /// Merge prefix-compatible expansions of `acronym` into the most complete
     /// form (e.g. "min viable product" → "minimum viable product"), summing
-    /// counts and coherence. Returns how many rows were merged away.
+    /// counts and coherence. Returns how many rows were merged away. The merged
+    /// row keeps the *newest* `last_seen` of its cluster, so dedup doesn't make
+    /// stale rows look freshly seen (which would dodge age-based pruning).
     pub fn dedup_potentials(&self, acronym: &str) -> Result<usize> {
         let acronym = acronym.trim().to_uppercase();
-        let mut rows = self.potentials_for(&acronym)?;
+        let mut rows: Vec<(String, i64, f64, Option<String>)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT expansion, count, coh_sum, last_seen FROM acronym_dictionary
+                 WHERE acronym = ?1 AND source = 'mined'",
+            )?;
+            stmt.query_map(params![acronym], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>>>()?
+        };
         let original = rows.len();
         // Longest first, so the canonical form of each cluster is the fullest.
         rows.sort_by_key(|r| std::cmp::Reverse(r.0.chars().count()));
 
-        let mut clusters: Vec<(String, i64, f64)> = Vec::new();
-        for (expansion, count, coh) in rows {
+        let mut clusters: Vec<(String, i64, f64, Option<String>)> = Vec::new();
+        for (expansion, count, coh, last_seen) in rows {
             match clusters.iter_mut().find(|c| similar(&c.0, &expansion)) {
                 Some(c) => {
                     c.1 += count;
                     c.2 += coh;
+                    // ISO-8601 text sorts chronologically.
+                    if last_seen > c.3 {
+                        c.3 = last_seen;
+                    }
                 }
-                None => clusters.push((expansion, count, coh)),
+                None => clusters.push((expansion, count, coh, last_seen)),
             }
         }
         if clusters.len() == original {
@@ -370,14 +385,32 @@ impl Store {
             "DELETE FROM acronym_dictionary WHERE acronym = ?1 AND source = 'mined'",
             params![acronym],
         )?;
-        for (expansion, count, coh) in &clusters {
+        for (expansion, count, coh, last_seen) in &clusters {
             self.conn.execute(
-                "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum)
-                 VALUES (?1, ?2, 'mined', ?3, ?4)",
-                params![acronym, expansion, count, coh],
+                "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum, last_seen)
+                 VALUES (?1, ?2, 'mined', ?3, ?4, COALESCE(?5, CURRENT_TIMESTAMP))",
+                params![acronym, expansion, count, coh, last_seen],
             )?;
         }
         Ok(original - clusters.len())
+    }
+
+    /// The `(acronym, expansion)` mined rows seen within the last `grace_secs` —
+    /// spared from the low-confidence drop so a freshly mined expansion gets time
+    /// to recur before it's judged.
+    pub fn recent_potentials(
+        &self,
+        grace_secs: i64,
+    ) -> Result<std::collections::HashSet<(String, String)>> {
+        let cutoff = format!("-{} seconds", grace_secs.max(0));
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, expansion FROM acronym_dictionary
+             WHERE source = 'mined' AND last_seen > datetime('now', ?1)",
+        )?;
+        let rows = stmt
+            .query_map(params![cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<std::collections::HashSet<_>>>()?;
+        Ok(rows)
     }
 
     /// Drop noise candidates — seen once, with nothing mined, not declared, and
@@ -842,6 +875,34 @@ mod tests {
             .map(|(a, _)| a)
             .collect();
         assert!(acrs.contains(&"MVP".to_string()) && !acrs.contains(&"XX".to_string()));
+    }
+
+    #[test]
+    fn dedup_preserves_age_so_stale_rows_stay_prunable() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_potential("MVP", "min viable product", 1.0)
+            .unwrap();
+        s.record_potential("MVP", "minimum viable product", 1.0)
+            .unwrap();
+        // Age the mined rows two hours into the past.
+        s.conn
+            .execute(
+                "UPDATE acronym_dictionary SET last_seen = datetime('now', '-2 hours')
+                 WHERE source = 'mined'",
+                [],
+            )
+            .unwrap();
+        s.dedup_potentials("MVP").unwrap();
+        // The merged row kept the old timestamp → not recent within an hour.
+        assert!(s.recent_potentials(3600).unwrap().is_empty());
+        // A freshly recorded one is recent.
+        s.record_potential("KPI", "key performance indicator", 1.0)
+            .unwrap();
+        assert!(
+            s.recent_potentials(3600)
+                .unwrap()
+                .contains(&("KPI".into(), "key performance indicator".into()))
+        );
     }
 
     #[test]

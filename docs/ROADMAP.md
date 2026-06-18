@@ -200,14 +200,17 @@ candidate).
       no spell) after a write, in-process and in the warm daemon
 - [x] prune grace — a candidate seen within `AE_PRUNE_GRACE_SECS` (default ~30
       days, low volume → patient; `0` = immediate) is spared, so an infrequent
-      token isn't yanked before it can recur weeks later
+      token isn't yanked before it can recur weeks later. Same grace gates the
+      low-confidence drop of *mined* expansions (`recent_potentials`), and
+      `dedup_potentials` keeps the newest `last_seen` so merging doesn't reset age
 - [ ] tune `WATCH_THRESHOLD` / `AE_GC_PERCENT` / `AE_PRUNE_GRACE_SECS`
 
 ### Speculation — next steps
 
 - [ ] dedup across differing word counts / via embedding similarity (prefix only
       handles same-length phrases today)
-- [ ] age-based staleness in GC (`last_seen`)
+- [x] age-based grace in GC (`last_seen`) — recent mined rows spared from the
+      low-confidence drop; dedup preserves the newest timestamp
 - [ ] mine alternative expansions for *known* acronyms too (currently candidates
       only)
 - [ ] fzf preview pane showing where each candidate/phrase was seen

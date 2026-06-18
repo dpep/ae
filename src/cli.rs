@@ -250,7 +250,10 @@ fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::
     let payload = engine.analyze(text)?;
     // Amortize GC across writes (skip on a best-effort error).
     if crate::engine::should_gc() {
-        let _ = engine.gc(crate::store::PRUNE_MIN_CONFIDENCE);
+        let _ = engine.gc(
+            crate::store::PRUNE_MIN_CONFIDENCE,
+            crate::engine::prune_grace_secs(),
+        );
     }
     Ok(payload)
 }
@@ -554,13 +557,15 @@ fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) ->
         for acronym in store.distinct_potential_acronyms()? {
             merged += store.dedup_potentials(&acronym)?;
         }
+        let grace = crate::engine::prune_grace_secs();
+        let recent = store.recent_potentials(grace)?;
         let mut dropped = 0;
         for (acronym, expansion, _, conf) in score_potentials(store, None)? {
-            if conf < min {
+            if conf < min && !recent.contains(&(acronym.clone(), expansion.clone())) {
                 dropped += store.delete_potential(&acronym, &expansion)?;
             }
         }
-        let candidates = store.prune_noise_candidates(crate::engine::prune_grace_secs())?;
+        let candidates = store.prune_noise_candidates(grace)?;
         Ok((corrected, merged, dropped, candidates))
     })();
 

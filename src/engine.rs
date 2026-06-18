@@ -237,24 +237,28 @@ impl Engine {
             .collect())
     }
 
-    /// Amortized GC: dedup mined expansions, drop low-confidence ones, and prune
-    /// noise candidates. The cheap subset of `ae prune` (no spell-correction),
-    /// run occasionally after a write to spread the cost — see [`should_gc`].
-    pub fn gc(&self, min_confidence: f32) -> rusqlite::Result<()> {
+    /// Amortized GC: dedup mined expansions, drop low-confidence ones (sparing
+    /// any seen within `grace_secs`, so a freshly mined phrase gets time to
+    /// recur), and prune noise candidates. The cheap subset of `ae prune` (no
+    /// spell-correction), run occasionally after a write — see [`should_gc`].
+    pub fn gc(&self, min_confidence: f32, grace_secs: i64) -> rusqlite::Result<()> {
         for acronym in self.store.distinct_potential_acronyms()? {
             self.store.dedup_potentials(&acronym)?;
         }
+        let recent = self.store.recent_potentials(grace_secs)?;
         let all = self.store.all_potentials()?;
         let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         for (acronym, _, count, _) in &all {
             *totals.entry(acronym.clone()).or_insert(0) += count;
         }
         for (acronym, expansion, count, coh) in all {
-            if crate::store::confidence(count, coh, totals[&acronym]) < min_confidence {
+            if crate::store::confidence(count, coh, totals[&acronym]) < min_confidence
+                && !recent.contains(&(acronym.clone(), expansion.clone()))
+            {
                 self.store.delete_potential(&acronym, &expansion)?;
             }
         }
-        self.store.prune_noise_candidates(prune_grace_secs())?;
+        self.store.prune_noise_candidates(grace_secs)?;
         Ok(())
     }
 
@@ -651,10 +655,25 @@ mod tests {
         e.analyze("we want a minimum viable product").unwrap();
         e.analyze("ship a min viable product too").unwrap();
         assert_eq!(e.potentials_for("MVP").unwrap().len(), 2);
-        e.gc(0.0).unwrap(); // min_confidence 0 → only dedup, no drops
+        e.gc(0.0, 0).unwrap(); // min_confidence 0 → only dedup, no drops
         let pots = e.potentials_for("MVP").unwrap();
         assert_eq!(pots.len(), 1);
         assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+    }
+
+    #[test]
+    fn gc_spares_recently_mined_low_confidence_expansions() {
+        let e = Engine::in_memory().unwrap();
+        e.declare_acronym("MVP").unwrap();
+        e.analyze("we want a minimum viable product").unwrap();
+        assert!(!e.potentials_for("MVP").unwrap().is_empty());
+        // A high floor would drop this speculative row — but it was just mined,
+        // so the grace window spares it...
+        e.gc(0.9, 3600).unwrap();
+        assert!(!e.potentials_for("MVP").unwrap().is_empty());
+        // ...and with no grace it's dropped.
+        e.gc(0.9, 0).unwrap();
+        assert!(e.potentials_for("MVP").unwrap().is_empty());
     }
 
     #[test]

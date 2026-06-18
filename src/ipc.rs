@@ -215,7 +215,10 @@ fn handle_connection(
             });
             // The warm daemon amortizes GC across requests.
             if !read_only && crate::engine::should_gc() {
-                let _ = engine.gc(crate::store::PRUNE_MIN_CONFIDENCE);
+                let _ = engine.gc(
+                    crate::store::PRUNE_MIN_CONFIDENCE,
+                    crate::engine::prune_grace_secs(),
+                );
             }
             write_frame(&mut stream, &serde_json::to_vec(&payload)?)?;
         }
