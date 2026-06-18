@@ -63,6 +63,12 @@ impl Engine {
         let learned = self.learn_and_persist(text)?;
         let candidates = candidate_acronyms(text, &expansions, &learned);
 
+        // Track how often we see undefined acronyms (analysis only — read-only
+        // analysis leaves no trace).
+        for candidate in &candidates {
+            self.store.record_candidate(candidate)?;
+        }
+
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
@@ -159,6 +165,11 @@ impl Engine {
     /// Number of acronyms currently known — exposed for diagnostics/tests.
     pub fn known_acronyms(&self) -> usize {
         self.trie.len()
+    }
+
+    /// Candidate acronyms and their occurrence counts (seen but undefined).
+    pub fn candidate_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        self.store.candidates()
     }
 }
 
@@ -311,6 +322,26 @@ mod tests {
         let out = e.analyze("see the PDP (Product Detail Page)").unwrap();
         assert!(out.extractions.iter().any(|c| c.acronym == "PDP"));
         assert!(!out.candidates.contains(&"PDP".to_string()));
+    }
+
+    #[test]
+    fn analyzing_tracks_candidate_frequency() {
+        let e = Engine::in_memory().unwrap();
+        e.analyze("ship the MVP").unwrap();
+        e.analyze("the MVP again, plus XYZ").unwrap();
+        let counts = e.candidate_counts().unwrap();
+        assert_eq!(
+            counts.iter().find(|(a, _)| a == "MVP").map(|(_, n)| *n),
+            Some(2)
+        );
+        assert!(counts.iter().any(|(a, _)| a == "XYZ"));
+    }
+
+    #[test]
+    fn read_only_does_not_record_candidates() {
+        let e = Engine::in_memory().unwrap();
+        e.expand_only("ship the MVP").unwrap();
+        assert!(e.candidate_counts().unwrap().is_empty());
     }
 
     #[test]

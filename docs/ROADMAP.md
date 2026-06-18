@@ -114,9 +114,14 @@ commit.
 ## Dictionary management
 
 - [x] `ae list` / `show <ACR>` / `search <QUERY>` / `add <ACR> <EXP>` /
-      `rm <ACR> [EXP]` subcommands (no flags; `-j/-J` honored). Operate on the
+      `candidates` subcommands (no flags; `-j/-J` honored). Operate on the
       `--db` store directly. Note: a running daemon needs `--stop` to pick up
       manual edits (its in-memory trie is hydrated at start)
+- [x] `ae rm <ACR> [substring] [--all]` — removes the only expansion, or one
+      picked by substring; refuses (and lists) when ambiguous; `--all` removes all
+- [x] candidate tracking — every analysis (not read-only) records undefined
+      acronym-shaped tokens with occurrence counts (`candidate_acronyms` table);
+      defining an acronym clears it. Surfaced via `ae candidates`
 
 ## Feature requests / backlog
 

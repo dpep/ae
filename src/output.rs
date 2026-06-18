@@ -84,6 +84,37 @@ pub fn render_entries(
     Ok(())
 }
 
+/// Render candidate acronyms with their occurrence counts (most-seen first).
+pub fn render_candidates(
+    out: &mut impl Write,
+    candidates: &[(String, i64)],
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => {
+            if candidates.is_empty() {
+                return writeln!(out, "No candidates.");
+            }
+            for (acronym, count) in candidates {
+                writeln!(out, "{acronym:<8} {count}")?;
+            }
+        }
+        Format::Json => {
+            let rows: Vec<_> = candidates
+                .iter()
+                .map(|(a, n)| json!({ "acronym": a, "count": n }))
+                .collect();
+            writeln!(out, "{}", serde_json::to_string_pretty(&rows).unwrap())?;
+        }
+        Format::Ndjson => {
+            for (acronym, count) in candidates {
+                writeln!(out, "{}", json!({ "acronym": acronym, "count": count }))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One analyzed line of a batch run: its number, original text, and findings.
 pub struct LineResult {
     pub line: usize,

@@ -79,10 +79,21 @@ ae add MVP "Minimum Viable Product"   # add an entry
 ae list                               # list everything
 ae search perf                        # substring search over acronyms + expansions
 ae show KPI                           # expansions of one acronym
-ae rm MVP                             # remove an acronym (or `ae rm PT "Part Time"`)
+ae candidates                         # acronyms seen but undefined, by frequency
 ```
 
-All of these honor `-j`/`-J` too (`ae list -j`).
+Removal disambiguates when an acronym has several expansions:
+
+```sh
+ae rm MVP            # removes it if there's one expansion; else lists them and stops
+ae rm MVP valuable  # substring picks one ("Most Valuable Player")
+ae rm MVP --all     # removes every expansion
+```
+
+`ae candidates` is fed automatically: every analysis records the acronym-shaped
+tokens it couldn't resolve and counts how often you've used them, so you can see
+what's worth defining. (Defining one clears it from the list.) All of these
+honor `-j`/`-J` too.
 
 Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. stdin (when
 piped) wins; otherwise the positional `TEXT` is used; with nothing to do, `ae`

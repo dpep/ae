@@ -113,11 +113,18 @@ pub enum Command {
     Search { query: String },
     /// Add an acronym/expansion to the dictionary.
     Add { acronym: String, expansion: String },
-    /// Remove an acronym (all expansions), or one specific expansion.
+    /// List candidate acronyms (seen but undefined) by frequency.
+    Candidates,
+    /// Remove an acronym. Bare `rm ACR` removes it when there's one expansion;
+    /// otherwise pass a substring to pick one, or `--all` to remove every one.
     #[command(visible_alias = "delete")]
     Rm {
         acronym: String,
+        /// Expansion substring selecting one variant when several exist.
         expansion: Option<String>,
+        /// Remove every expansion of the acronym.
+        #[arg(short, long)]
+        all: bool,
     },
 }
 
@@ -331,30 +338,115 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             }
             Err(e) => fail(fmt, &format!("add failed: {e}")),
         },
-        Command::Rm { acronym, expansion } => {
-            let deleted = match expansion {
-                Some(expansion) => store.delete_entry(acronym, expansion),
-                None => store.delete_acronym(acronym),
-            };
-            match deleted {
-                Ok(n) => {
-                    let acronym = acronym.to_uppercase();
-                    match fmt {
-                        Format::Human => {
-                            let noun = if n == 1 { "entry" } else { "entries" };
-                            println!("ae: removed {n} {noun} for {acronym}");
-                        }
-                        _ => println!(
-                            "{}",
-                            serde_json::json!({"status": "removed", "acronym": acronym, "removed": n})
-                        ),
-                    }
-                    ExitCode::SUCCESS
+        Command::Candidates => match store.candidates() {
+            Ok(candidates) => {
+                let stdout = io::stdout();
+                if let Err(e) = output::render_candidates(&mut stdout.lock(), &candidates, fmt) {
+                    return fail(fmt, &format!("render failed: {e}"));
                 }
-                Err(e) => fail(fmt, &format!("delete failed: {e}")),
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(fmt, &format!("dictionary error: {e}")),
+        },
+        Command::Rm {
+            acronym,
+            expansion,
+            all,
+        } => run_rm(&store, fmt, acronym, expansion.as_deref(), *all),
+    }
+}
+
+/// Resolve and execute a removal, disambiguating among multiple expansions.
+fn run_rm(
+    store: &crate::store::Store,
+    fmt: Format,
+    acronym: &str,
+    pattern: Option<&str>,
+    all: bool,
+) -> ExitCode {
+    let variants = match store.expansions_for(acronym) {
+        Ok(v) => v,
+        Err(e) => return fail(fmt, &format!("delete failed: {e}")),
+    };
+    let acronym = acronym.to_uppercase();
+    if variants.is_empty() {
+        return removed_status(fmt, &acronym, 0);
+    }
+
+    let all_exps: Vec<String> = variants.iter().map(|(_, e)| e.clone()).collect();
+    let targets: Vec<String> = if all {
+        all_exps
+    } else if let Some(pat) = pattern {
+        let needle = pat.to_lowercase();
+        let matched: Vec<String> = all_exps
+            .iter()
+            .filter(|e| e.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
+        match matched.len() {
+            0 => {
+                return refuse(
+                    fmt,
+                    &acronym,
+                    &format!("no expansion matches \"{pat}\""),
+                    &all_exps,
+                );
+            }
+            1 => matched,
+            _ => {
+                return refuse(
+                    fmt,
+                    &acronym,
+                    &format!("\"{pat}\" matches several expansions"),
+                    &matched,
+                );
             }
         }
+    } else if all_exps.len() == 1 {
+        all_exps
+    } else {
+        return refuse(fmt, &acronym, "has several expansions", &all_exps);
+    };
+
+    let mut removed = 0;
+    for expansion in &targets {
+        match store.delete_entry(&acronym, expansion) {
+            Ok(n) => removed += n,
+            Err(e) => return fail(fmt, &format!("delete failed: {e}")),
+        }
     }
+    removed_status(fmt, &acronym, removed)
+}
+
+fn removed_status(fmt: Format, acronym: &str, n: usize) -> ExitCode {
+    match fmt {
+        Format::Human => {
+            let noun = if n == 1 { "entry" } else { "entries" };
+            println!("ae: removed {n} {noun} for {acronym}");
+        }
+        _ => println!(
+            "{}",
+            serde_json::json!({"status": "removed", "acronym": acronym, "removed": n})
+        ),
+    }
+    ExitCode::SUCCESS
+}
+
+/// Decline an ambiguous removal, listing the expansions so the user can refine.
+fn refuse(fmt: Format, acronym: &str, reason: &str, expansions: &[String]) -> ExitCode {
+    match fmt {
+        Format::Human => {
+            eprintln!("ae: {acronym} {reason} — specify a substring or use --all:");
+            for e in expansions {
+                eprintln!("  {e}");
+            }
+        }
+        _ => eprintln!(
+            "{}",
+            serde_json::json!({"error": "ambiguous", "acronym": acronym, "reason": reason, "expansions": expansions})
+        ),
+    }
+    ExitCode::FAILURE
 }
 
 /// Render a list of `(acronym, expansion)` entries, or report the error.

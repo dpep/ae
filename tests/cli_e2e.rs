@@ -298,6 +298,55 @@ fn manage_add_list_search_show_then_remove() {
 }
 
 #[test]
+fn rm_disambiguates_among_multiple_variants() {
+    let sock = scratch_socket("rmvariants");
+    run(&sock, &["add", "MVP", "Minimum Viable Product"], None);
+    run(&sock, &["add", "MVP", "Most Valuable Player"], None);
+
+    // Bare rm refuses when several variants exist.
+    assert!(!run(&sock, &["rm", "MVP"], None).success);
+
+    // A substring picks exactly one.
+    let one = run(&sock, &["rm", "MVP", "valuable", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&one.stdout).unwrap();
+    assert_eq!(v["removed"], 1);
+
+    // With one left, bare rm removes it.
+    let rest = run(&sock, &["rm", "MVP", "-j"], None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rest.stdout).unwrap()["removed"],
+        1
+    );
+}
+
+#[test]
+fn rm_all_removes_every_variant() {
+    let sock = scratch_socket("rmall");
+    run(&sock, &["add", "PT", "Physical Therapy"], None);
+    run(&sock, &["add", "PT", "Part Time"], None);
+    let out = run(&sock, &["rm", "PT", "--all", "-j"], None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap()["removed"],
+        2
+    );
+}
+
+#[test]
+fn candidates_command_lists_undefined_acronyms_with_counts() {
+    let sock = scratch_socket("cands");
+    // Analysis surfaces and records MVP as a candidate.
+    run(&sock, &["-j"], Some("ship the MVP"));
+    let out = run(&sock, &["candidates", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["acronym"] == "MVP" && c["count"].as_i64().unwrap() >= 1)
+    );
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));

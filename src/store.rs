@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS acronym_contexts (
 
 CREATE INDEX IF NOT EXISTS idx_context_acronym
     ON acronym_contexts(acronym_id);
+
+-- Acronym-shaped tokens seen but not (yet) defined, with how often.
+CREATE TABLE IF NOT EXISTS candidate_acronyms (
+    acronym TEXT PRIMARY KEY,
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ";
 
 /// A small built-in dictionary so expansion works on a fresh database.
@@ -82,11 +90,47 @@ impl Store {
             "INSERT OR IGNORE INTO acronym_dictionary (acronym, expansion) VALUES (?1, ?2)",
             params![acronym, expansion],
         )?;
+        // It's now defined, so it's no longer an open candidate.
+        self.clear_candidate(&acronym)?;
         self.conn.query_row(
             "SELECT id FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
             params![acronym, expansion],
             |row| row.get(0),
         )
+    }
+
+    /// Record one sighting of an undefined acronym-shaped token, bumping its
+    /// occurrence count.
+    pub fn record_candidate(&self, acronym: &str) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
+        if acronym.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO candidate_acronyms (acronym, count) VALUES (?1, 1)
+             ON CONFLICT(acronym) DO UPDATE SET count = count + 1, last_seen = CURRENT_TIMESTAMP",
+            params![acronym],
+        )?;
+        Ok(())
+    }
+
+    /// Candidate acronyms with their occurrence counts, most-seen first.
+    pub fn candidates(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, count FROM candidate_acronyms ORDER BY count DESC, acronym",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn clear_candidate(&self, acronym: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM candidate_acronyms WHERE acronym = ?1",
+            params![acronym.trim().to_uppercase()],
+        )?;
+        Ok(())
     }
 
     /// Seed the built-in dictionary if the table is empty. Returns the number of
@@ -294,6 +338,22 @@ mod tests {
         assert!(s.expansions_for("PT").unwrap().is_empty());
         // Deleting something absent removes nothing.
         assert_eq!(s.delete_acronym("ZZ").unwrap(), 0);
+    }
+
+    #[test]
+    fn candidates_count_and_clear_when_defined() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_candidate("MVP").unwrap();
+        s.record_candidate("mvp").unwrap(); // case-insensitive → same row
+        s.record_candidate("ABC").unwrap();
+        // MVP seen twice → ranks first.
+        assert_eq!(
+            s.candidates().unwrap(),
+            vec![("MVP".into(), 2), ("ABC".into(), 1)]
+        );
+        // Defining it removes it from the candidate list.
+        s.add_entry("MVP", "Minimum Viable Product").unwrap();
+        assert_eq!(s.candidates().unwrap(), vec![("ABC".into(), 1)]);
     }
 
     #[test]
