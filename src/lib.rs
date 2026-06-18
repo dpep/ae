@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod learn;
 pub mod mrl;
 pub mod output;
+pub mod spell;
 pub mod store;
 pub mod trie;
 pub mod types;

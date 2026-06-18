@@ -44,15 +44,15 @@ CREATE INDEX IF NOT EXISTS idx_context_acronym
     ON acronym_contexts(acronym_id);
 
 -- Acronym-shaped tokens seen but not (yet) defined — the 'is this an acronym'
--- signal (per acronym, not per expansion). `source` is its provenance, mirroring
--- expansions: 'user' (a person declared it via `ae watch`) vs 'observed' (ae
--- auto-detected it in text). We mine expansions for an acronym once it's 'user'
--- or has been observed `count` >= threshold times; pruning drops seldom-seen
--- 'observed' ones and never 'user' ones.
+-- signal (per acronym, not per expansion). `source` is its provenance:
+-- 'declared' (a person said it's an acronym) vs 'seen' (ae noticed it in text).
+-- An acronym joins the **watch list** (we hunt its expansions) once it's
+-- 'declared' or has been seen `count` >= threshold times; pruning drops
+-- seldom-seen 'seen' ones and never 'declared' ones.
 CREATE TABLE IF NOT EXISTS candidate_acronyms (
     acronym TEXT PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 1,
-    source TEXT NOT NULL DEFAULT 'observed',
+    source TEXT NOT NULL DEFAULT 'seen',
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -115,7 +115,7 @@ impl Store {
             );
         }
         let _ = conn.execute(
-            "ALTER TABLE candidate_acronyms ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'",
+            "ALTER TABLE candidate_acronyms ADD COLUMN source TEXT NOT NULL DEFAULT 'seen'",
             [],
         );
         Ok(Self { conn })
@@ -166,27 +166,26 @@ impl Store {
         Ok(())
     }
 
-    /// Record that a person declared `acronym` to be an acronym (`source` =
-    /// `'user'`) — so its expansions are always mined and it's never pruned,
-    /// even before it's been seen often.
+    /// Declare `acronym` to be an acronym (`source = 'declared'`) — it joins the
+    /// watch list immediately and is never pruned, even before it's seen often.
     pub fn declare_acronym(&self, acronym: &str) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
         if acronym.is_empty() {
             return Ok(());
         }
         self.conn.execute(
-            "INSERT INTO candidate_acronyms (acronym, source) VALUES (?1, 'user')
-             ON CONFLICT(acronym) DO UPDATE SET source = 'user'",
+            "INSERT INTO candidate_acronyms (acronym, source) VALUES (?1, 'declared')
+             ON CONFLICT(acronym) DO UPDATE SET source = 'declared'",
             params![acronym],
         )?;
         Ok(())
     }
 
-    /// Acronyms worth mining expansions for: user-declared, or observed at least
-    /// `min_count` times (promoted from noise to "of interest").
-    pub fn mineable_acronyms(&self, min_count: i64) -> Result<Vec<String>> {
+    /// The watch list: acronyms we hunt expansions for — declared, or seen at
+    /// least `min_count` times (promoted from noise to "of interest").
+    pub fn watch_list(&self, min_count: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT acronym FROM candidate_acronyms WHERE source = 'user' OR count >= ?1",
+            "SELECT acronym FROM candidate_acronyms WHERE source = 'declared' OR count >= ?1",
         )?;
         let rows = stmt
             .query_map(params![min_count], |row| row.get(0))?
@@ -238,6 +237,30 @@ impl Store {
              ON CONFLICT(acronym, expansion) DO UPDATE
                SET count = count + 1, coh_sum = coh_sum + ?3, last_seen = CURRENT_TIMESTAMP",
             params![acronym, expansion, coherence as f64],
+        )?;
+        Ok(())
+    }
+
+    /// Add a mined expansion with an explicit count/coherence (accumulating if
+    /// it already exists) — used by `prune` to move a spell-corrected row.
+    pub fn accumulate_potential(
+        &self,
+        acronym: &str,
+        expansion: &str,
+        count: i64,
+        coh: f64,
+    ) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
+        let expansion = expansion.trim().to_lowercase();
+        if acronym.is_empty() || expansion.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum)
+             VALUES (?1, ?2, 'mined', ?3, ?4)
+             ON CONFLICT(acronym, expansion) DO UPDATE
+               SET count = count + ?3, coh_sum = coh_sum + ?4, last_seen = CURRENT_TIMESTAMP",
+            params![acronym, expansion, count, coh],
         )?;
         Ok(())
     }
@@ -337,7 +360,7 @@ impl Store {
     pub fn prune_noise_candidates(&self) -> Result<usize> {
         let n = self.conn.execute(
             "DELETE FROM candidate_acronyms
-             WHERE count <= 1 AND source != 'user'
+             WHERE count <= 1 AND source != 'declared'
                AND acronym NOT IN
                    (SELECT acronym FROM acronym_dictionary WHERE source = 'mined')",
             [],
@@ -758,11 +781,11 @@ mod tests {
     }
 
     #[test]
-    fn declared_acronyms_are_mineable_and_survive_pruning() {
+    fn declared_acronyms_are_on_the_watch_list_and_survive_pruning() {
         let s = Store::open_in_memory().unwrap();
         s.declare_acronym("MVP").unwrap();
-        s.record_candidate("XX").unwrap(); // observed once → prunable noise
-        assert!(s.mineable_acronyms(2).unwrap().contains(&"MVP".to_string()));
+        s.record_candidate("XX").unwrap(); // seen once → prunable noise
+        assert!(s.watch_list(3).unwrap().contains(&"MVP".to_string()));
         s.prune_noise_candidates().unwrap();
         let acrs: Vec<String> = s
             .candidates()

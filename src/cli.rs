@@ -114,10 +114,10 @@ pub enum Command {
     List { filter: Option<String> },
     /// Show the expansions of one acronym.
     Show { acronym: String },
-    /// Add an acronym with one or more expansions to the dictionary.
+    /// Add an acronym with one or more expansions. With no expansion, just
+    /// declares the token is an acronym (same as `watch`) — "figure it out".
     Add {
         acronym: String,
-        #[arg(required = true)]
         expansions: Vec<String>,
     },
     /// List candidate acronyms (seen but undefined) by frequency.
@@ -436,6 +436,18 @@ fn run_add(
     acronym: &str,
     expansions: &[String],
 ) -> ExitCode {
+    // No expansion → declare it's an acronym to watch ("figure it out").
+    if expansions.is_empty() {
+        return match store.declare_acronym(acronym) {
+            Ok(()) => status(
+                fmt,
+                quiet,
+                "watching",
+                &format!("now watching {} for expansions", acronym.to_uppercase()),
+            ),
+            Err(e) => fail(fmt, &format!("watch failed: {e}")),
+        };
+    }
     for expansion in expansions {
         if let Err(e) = store.add_entry(acronym, expansion, "user") {
             return fail(fmt, &format!("add failed: {e}"));
@@ -533,10 +545,22 @@ fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
     ((0.5 * share + 0.5 * mean_coh) * (count / (count + 1.0))).clamp(0.0, 1.0)
 }
 
-/// GC speculation: dedup prefix-duplicate expansions, drop low-confidence ones,
-/// and remove seen-once noise candidates.
+/// GC speculation: spell-correct mined expansions, dedup (prefix + fuzzy), drop
+/// low-confidence ones, and remove seen-once noise candidates.
 fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) -> ExitCode {
-    let result = (|| -> rusqlite::Result<(usize, usize, usize)> {
+    let result = (|| -> rusqlite::Result<(usize, usize, usize, usize)> {
+        // Spell-correct first (if a word list exists) so fixed forms then merge.
+        let mut corrected = 0;
+        if let Some(words) = crate::spell::load_wordlist() {
+            for (acronym, expansion, count, coh) in store.all_potentials()? {
+                let fixed = crate::spell::correct(&expansion, &words);
+                if fixed != expansion {
+                    store.delete_potential(&acronym, &expansion)?;
+                    store.accumulate_potential(&acronym, &fixed, count, coh)?;
+                    corrected += 1;
+                }
+            }
+        }
         let mut merged = 0;
         for acronym in store.distinct_potential_acronyms()? {
             merged += store.dedup_potentials(&acronym)?;
@@ -548,19 +572,19 @@ fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) ->
             }
         }
         let candidates = store.prune_noise_candidates()?;
-        Ok((merged, dropped, candidates))
+        Ok((corrected, merged, dropped, candidates))
     })();
 
     match result {
-        Ok((merged, dropped, candidates)) => {
+        Ok((corrected, merged, dropped, candidates)) => {
             if !quiet {
                 match fmt {
                     Format::Human => println!(
-                        "ae: pruned — merged {merged}, dropped {dropped} low-confidence, removed {candidates} noise candidates"
+                        "ae: pruned — corrected {corrected}, merged {merged}, dropped {dropped} low-confidence, removed {candidates} noise candidates"
                     ),
                     _ => println!(
                         "{}",
-                        serde_json::json!({"status": "pruned", "merged": merged, "dropped": dropped, "candidates_removed": candidates})
+                        serde_json::json!({"status": "pruned", "corrected": corrected, "merged": merged, "dropped": dropped, "candidates_removed": candidates})
                     ),
                 }
             }

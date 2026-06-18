@@ -87,19 +87,26 @@ ae list                               # list everything
 ae list perf                          # filter by substring of acronym or expansion
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
-ae watch PB&J                         # declare a token is an acronym (mine it, never prune)
+ae watch PB&J                         # declare a token is an acronym (same as `add PB&J`)
 ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
 ae define MVP                         # promote interactively (fzf), or pass expansions
-ae prune                              # GC: dedup (prefix + fuzzy) + drop low-confidence/noise
+ae prune                              # GC: spell-fix + dedup (prefix+fuzzy) + drop noise
 ```
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
 learns; `ae add … -q` adds without printing).
 
-An acronym is **mine-worthy** (we hunt its expansions in later text) once it's
-either declared with `ae watch` or *observed* often enough — below that it's just
-noise and `ae prune` drops it. Punctuated acronyms like `PB&J`, `R&D`, `U.S.A`
-are detected and mined too (the `&`/`.` maps to a skipped filler word).
+Each acronym has a **provenance**: `declared` (you said it's an acronym, via
+`ae watch` or `ae add ACR` with no expansion) or `seen` (ae noticed it). An
+acronym joins the **watch list** — where we hunt its expansions in later text —
+once it's declared or has been *seen* enough times (default 3); below that it's
+noise and `ae prune` drops it. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
+detected and mined too (the `&`/`.` maps to a skipped filler word), and a longer
+match wins over its parts (`PB&J` beats `PB`, maximal munch).
+
+`ae prune` also spell-corrects mined expansions against the **system** word list
+(`/usr/share/dict/words`, if present — nothing bundled), so "minimum viabel
+product" converges to "minimum viable product" before dedup.
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An

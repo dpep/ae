@@ -16,9 +16,9 @@ use crate::trie::SharedTrie;
 use crate::types::{AnalysisPayload, ExpansionResult, MatchCandidate};
 use crate::{learn, types::Extraction};
 
-/// An acronym must recur this often (or be user-declared) before we mine its
-/// expansions from unrelated text.
-const MINE_THRESHOLD: i64 = 2;
+/// An acronym must be seen this often (or be declared) before it joins the
+/// watch list and we mine its expansions from unrelated text.
+const WATCH_THRESHOLD: i64 = 3;
 
 /// Acronym-shaped tokens with internal punctuation (`PB&J`, `R&D`, `U.S.A`) that
 /// the plain alphanumeric tokenizer would split apart.
@@ -106,14 +106,16 @@ impl Engine {
     /// Stage 1 — scan the text for known acronyms and rank their expansions.
     fn expand(&self, text: &str, query_vec: &[f32]) -> rusqlite::Result<Vec<ExpansionResult>> {
         let mut results: Vec<ExpansionResult> = Vec::new();
+        // Maximal munch: don't expand a "PB" that's really part of a "PB&J".
+        let covered = covered_parts(text);
 
-        for token in tokens(text).chain(punctuated_acronyms(text)) {
+        for token in punctuated_acronyms(text).chain(tokens(text)) {
             if !self.trie.contains(token) {
                 continue;
             }
             let acronym = token.to_uppercase();
-            if results.iter().any(|r| r.acronym == acronym) {
-                continue; // already handled this acronym in this sentence
+            if covered.contains(&acronym) || results.iter().any(|r| r.acronym == acronym) {
+                continue; // a longer acronym covers it, or already handled
             }
 
             let mut matches: Vec<MatchCandidate> = self
@@ -223,9 +225,9 @@ impl Engine {
         }
 
         // Cross-text lookout: scan this text for the expansions of *other*
-        // mine-worthy acronyms — user-declared, or observed often enough to be
-        // promoted from noise to mining (length ≥ 3 limits short-acronym noise).
-        for acronym in self.store.mineable_acronyms(MINE_THRESHOLD)? {
+        // watch-list acronyms — declared, or seen often enough to be promoted
+        // from noise to mining (length ≥ 3 limits short-acronym noise).
+        for acronym in self.store.watch_list(WATCH_THRESHOLD)? {
             if present.contains(&acronym) || acronym.chars().count() < 3 {
                 continue;
             }
@@ -345,15 +347,10 @@ fn candidate_acronyms(
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
 
-    // Punctuated acronyms first, so we can suppress their split-apart parts
-    // (e.g. "PB&J" must not also surface "PB" and "J").
-    let mut covered = std::collections::HashSet::new();
+    // Punctuated acronyms first (maximal munch): a "PB&J" suppresses its parts
+    // "PB" and "J".
+    let covered = covered_parts(text);
     for token in punctuated_acronyms(text) {
-        for part in token.split(|c: char| !c.is_alphanumeric()) {
-            if !part.is_empty() {
-                covered.insert(part.to_uppercase());
-            }
-        }
         let upper = token.to_uppercase();
         if !resolved.contains(&upper) && seen.insert(upper) {
             out.push(token.to_string());
@@ -369,6 +366,20 @@ fn candidate_acronyms(
         }
     }
     out
+}
+
+/// Uppercase sub-tokens covered by a punctuated acronym (`PB&J` → `{PB, J}`),
+/// so the longer match suppresses its parts (maximal munch).
+fn covered_parts(text: &str) -> std::collections::HashSet<String> {
+    let mut covered = std::collections::HashSet::new();
+    for token in punctuated_acronyms(text) {
+        for part in token.split(|c: char| !c.is_alphanumeric()) {
+            if !part.is_empty() {
+                covered.insert(part.to_uppercase());
+            }
+        }
+    }
+    covered
 }
 
 /// Heuristic acronym shape: 2–6 chars, all uppercase letters or digits, at
@@ -554,16 +565,17 @@ mod tests {
     }
 
     #[test]
-    fn cross_text_mining_waits_for_the_promotion_threshold() {
+    fn cross_text_mining_waits_for_the_watch_threshold() {
         let e = Engine::in_memory().unwrap();
-        // Seen once → not yet mine-worthy; the later text isn't scanned for it.
+        // Seen twice (< threshold of 3) → not yet on the watch list.
         e.analyze("the MVP ships next week").unwrap();
+        e.analyze("ping me about the MVP today").unwrap();
         e.analyze("we scoped a minimum viable product for launch")
             .unwrap();
         assert!(e.potentials_for("MVP").unwrap().is_empty());
 
-        // Seen again → promoted; now cross-text mining picks the phrase up.
-        e.analyze("ping me about the MVP today").unwrap();
+        // A third sighting promotes it; now cross-text mining picks the phrase up.
+        e.analyze("the MVP demo is friday").unwrap();
         e.analyze("we shipped a minimum viable product").unwrap();
         let pots = e.potentials_for("MVP").unwrap();
         assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
