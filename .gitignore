@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.db
+*.sqlite
+*.sqlite3
+*.sock
+.DS_Store
