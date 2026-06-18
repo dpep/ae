@@ -39,6 +39,16 @@ pub fn should_gc() -> bool {
     (nanos % 100) < percent
 }
 
+/// Grace period (seconds) before a seen-once candidate is eligible for noise
+/// pruning — `AE_PRUNE_GRACE_SECS`, default 1 hour (`0` prunes immediately, for
+/// tests). Recently seen tokens are kept so they don't vanish mid-use.
+pub fn prune_grace_secs() -> i64 {
+    std::env::var("AE_PRUNE_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3600)
+}
+
 /// Acronym-shaped tokens with internal punctuation (`PB&J`, `R&D`, `U.S.A`) that
 /// the plain alphanumeric tokenizer would split apart.
 static PUNCTUATED_ACRONYM: LazyLock<Regex> =
@@ -243,7 +253,7 @@ impl Engine {
                 self.store.delete_potential(&acronym, &expansion)?;
             }
         }
-        self.store.prune_noise_candidates()?;
+        self.store.prune_noise_candidates(prune_grace_secs())?;
         Ok(())
     }
 

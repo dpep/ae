@@ -560,7 +560,7 @@ fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) ->
                 dropped += store.delete_potential(&acronym, &expansion)?;
             }
         }
-        let candidates = store.prune_noise_candidates()?;
+        let candidates = store.prune_noise_candidates(crate::engine::prune_grace_secs())?;
         Ok((corrected, merged, dropped, candidates))
     })();
 

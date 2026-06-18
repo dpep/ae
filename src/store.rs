@@ -375,15 +375,19 @@ impl Store {
         Ok(original - clusters.len())
     }
 
-    /// Drop noise candidates (seen once, with nothing mined) and any orphaned
-    /// context rows. Returns the number of candidates removed.
-    pub fn prune_noise_candidates(&self) -> Result<usize> {
+    /// Drop noise candidates — seen once, with nothing mined, not declared, and
+    /// not seen within the last `grace_secs` (so a just-seen token isn't yanked
+    /// out from under the user) — plus any orphaned context rows. Returns the
+    /// number of candidates removed.
+    pub fn prune_noise_candidates(&self, grace_secs: i64) -> Result<usize> {
+        let cutoff = format!("-{} seconds", grace_secs.max(0));
         let n = self.conn.execute(
             "DELETE FROM candidate_acronyms
              WHERE count <= 1 AND source != 'declared'
+               AND last_seen <= datetime('now', ?1)
                AND acronym NOT IN
                    (SELECT acronym FROM acronym_dictionary WHERE source = 'mined')",
-            [],
+            params![cutoff],
         )?;
         self.conn.execute(
             "DELETE FROM candidate_contexts
@@ -825,7 +829,7 @@ mod tests {
         s.declare_acronym("MVP").unwrap();
         s.record_candidate("XX").unwrap(); // seen once → prunable noise
         assert!(s.watch_list(3).unwrap().contains(&"MVP".to_string()));
-        s.prune_noise_candidates().unwrap();
+        s.prune_noise_candidates(0).unwrap(); // no grace → prune immediately
         let acrs: Vec<String> = s
             .candidates()
             .unwrap()
@@ -836,13 +840,21 @@ mod tests {
     }
 
     #[test]
+    fn pruning_spares_recently_seen_candidates() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_candidate("XX").unwrap(); // seen just now
+        assert_eq!(s.prune_noise_candidates(3600).unwrap(), 0); // within grace → kept
+        assert_eq!(s.prune_noise_candidates(0).unwrap(), 1); // no grace → pruned
+    }
+
+    #[test]
     fn prune_drops_seen_once_candidates_with_nothing_mined() {
         let s = Store::open_in_memory().unwrap();
         s.record_candidate("XX").unwrap(); // seen once, no potentials → noise
         s.record_candidate("MVP").unwrap();
         s.record_potential("MVP", "minimum viable product", 1.0)
             .unwrap();
-        assert_eq!(s.prune_noise_candidates().unwrap(), 1);
+        assert_eq!(s.prune_noise_candidates(0).unwrap(), 1);
         let acrs: Vec<String> = s
             .candidates()
             .unwrap()

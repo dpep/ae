@@ -26,17 +26,30 @@ struct Output {
 }
 
 /// Run `ae` with `args`, feeding `stdin` (or an empty closed stdin if `None`).
+/// Auto-GC is disabled so tests are deterministic.
 fn run(socket: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Output {
+    run_with_env(socket, args, stdin, &[("AE_GC_PERCENT", "0")])
+}
+
+/// Like [`run`], but with explicit env overrides — e.g. forcing GC on.
+fn run_with_env(
+    socket: &std::path::Path,
+    args: &[&str],
+    stdin: Option<&str>,
+    env: &[(&str, &str)],
+) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ae"));
     cmd.arg("--socket")
         .arg(socket)
         .arg("--db")
         .arg(socket.with_extension("db"))
         .args(args)
-        .env("AE_GC_PERCENT", "0") // deterministic: no random GC during tests
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     let mut child = cmd.spawn().unwrap();
     if let Some(text) = stdin {
         child
@@ -571,6 +584,28 @@ fn add_without_expansion_declares_an_acronym() {
             .iter()
             .any(|r| r["acronym"] == "MVP" && r["source"] == "declared" && r["watching"] == true)
     );
+}
+
+#[test]
+fn auto_gc_runs_after_a_write_and_prunes_noise() {
+    let sock = scratch_socket("autogc");
+    // Force GC on every write, with no grace, so the seen-once noise candidate
+    // is cleaned up by the GC that fires right after this analysis.
+    let env = [("AE_GC_PERCENT", "100"), ("AE_PRUNE_GRACE_SECS", "0")];
+    let a = run_with_env(&sock, &["-j"], Some("the ZZQ widget"), &env);
+    let v: serde_json::Value = serde_json::from_str(&a.stdout).unwrap();
+    assert!(
+        v["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "ZZQ")
+    );
+
+    // The candidate is gone — GC pruned it (read-only command, GC won't refire).
+    let c = run_with_env(&sock, &["candidates", "-j"], None, &env);
+    let cv: serde_json::Value = serde_json::from_str(&c.stdout).unwrap();
+    assert!(cv.as_array().unwrap().iter().all(|r| r["acronym"] != "ZZQ"));
 }
 
 #[test]
