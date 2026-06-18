@@ -74,6 +74,11 @@ pub const WATCH_THRESHOLD: i64 = 3;
 /// below. `suggest` keeps a higher bar of its own.
 pub const PRUNE_MIN_CONFIDENCE: f32 = 0.15;
 
+/// Default grace before a seen-once candidate is eligible for noise pruning.
+/// Volume is low, so we're patient — a token seen once may legitimately recur
+/// days later. ~30 days; override with `AE_PRUNE_GRACE_SECS`.
+pub const DEFAULT_PRUNE_GRACE_SECS: i64 = 30 * 24 * 60 * 60;
+
 /// A small built-in dictionary so expansion works on a fresh database.
 pub const DEFAULT_DICTIONARY: &[(&str, &str)] = &[
     ("OKR", "Objectives and Key Results"),

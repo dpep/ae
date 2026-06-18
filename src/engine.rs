@@ -40,13 +40,14 @@ pub fn should_gc() -> bool {
 }
 
 /// Grace period (seconds) before a seen-once candidate is eligible for noise
-/// pruning — `AE_PRUNE_GRACE_SECS`, default 1 hour (`0` prunes immediately, for
-/// tests). Recently seen tokens are kept so they don't vanish mid-use.
+/// pruning — `AE_PRUNE_GRACE_SECS`, default [`crate::store::DEFAULT_PRUNE_GRACE_SECS`]
+/// (~30 days; `0` prunes immediately, for tests). Recently seen tokens are kept
+/// so they don't vanish mid-use.
 pub fn prune_grace_secs() -> i64 {
     std::env::var("AE_PRUNE_GRACE_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(3600)
+        .unwrap_or(crate::store::DEFAULT_PRUNE_GRACE_SECS)
 }
 
 /// Acronym-shaped tokens with internal punctuation (`PB&J`, `R&D`, `U.S.A`) that

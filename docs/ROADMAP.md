@@ -198,8 +198,9 @@ candidate).
 - [x] amortized auto-GC: `should_gc()` (random `AE_GC_PERCENT`, default 5; `0`
       disables for tests) runs `Engine::gc` (dedup + drop low-conf + prune noise,
       no spell) after a write, in-process and in the warm daemon
-- [x] prune grace — a candidate seen within `AE_PRUNE_GRACE_SECS` (default 3600;
-      `0` = immediate) is spared, so a just-seen token isn't yanked mid-use
+- [x] prune grace — a candidate seen within `AE_PRUNE_GRACE_SECS` (default ~30
+      days, low volume → patient; `0` = immediate) is spared, so an infrequent
+      token isn't yanked before it can recur weeks later
 - [ ] tune `WATCH_THRESHOLD` / `AE_GC_PERCENT` / `AE_PRUNE_GRACE_SECS`
 
 ### Speculation — next steps

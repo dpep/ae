@@ -112,8 +112,9 @@ You rarely need to run it by hand: a cheap subset (dedup + drop low-confidence +
 clear noise, no spell-fix) runs **automatically** with a small random chance
 after each write — in-process and, especially, in the warm daemon — to amortize
 the cost. Tune or disable it with `AE_GC_PERCENT` (default `5`, `0` off). A
-candidate seen within `AE_PRUNE_GRACE_SECS` (default one hour) is spared, so a
-token you just saw once doesn't vanish before it can recur.
+candidate seen within `AE_PRUNE_GRACE_SECS` (default ~30 days — volume is low, so
+we're patient) is spared, so a token you saw once can recur weeks later before
+it's ever considered noise.
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An
