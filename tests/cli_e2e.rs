@@ -30,6 +30,8 @@ fn run(socket: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ae"));
     cmd.arg("--socket")
         .arg(socket)
+        .arg("--db")
+        .arg(socket.with_extension("db"))
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

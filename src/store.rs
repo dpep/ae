@@ -53,7 +53,11 @@ pub struct Store {
 
 impl Store {
     /// Open (creating if needed) a database at `path` and apply the schema.
+    /// Parent directories are created if missing.
     pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let conn = Connection::open(path)?;
         Self::init(conn)
     }

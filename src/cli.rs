@@ -51,6 +51,11 @@ pub struct Cli {
     #[arg(long, default_value = "/tmp/ae.sock")]
     pub socket: PathBuf,
 
+    /// Acronym dictionary database. Defaults to a per-user data dir
+    /// (`$XDG_DATA_HOME/ae/acronyms.db`, else `~/.local/share/ae/acronyms.db`).
+    #[arg(long, env = "AE_DB")]
+    pub db: Option<PathBuf>,
+
     /// Embedding model: a path (directory or `.onnx` file) or a name resolved
     /// against the model search dirs. Defaults to the bundled/cached model.
     #[arg(short, long)]
@@ -66,6 +71,12 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Resolved dictionary path: `--db`/`$AE_DB` if given, else the per-user
+    /// data-dir default.
+    pub fn db_path(&self) -> PathBuf {
+        self.db.clone().unwrap_or_else(default_db_path)
+    }
+
     /// The effective output format. Default is human; `-J/--ndjson` wins over
     /// `-j/--json`.
     pub fn format(&self) -> Format {
@@ -94,7 +105,7 @@ pub fn run() -> ExitCode {
 
     // Internal Leader process: serve until stopped, then exit.
     if cli.serve {
-        return match ipc::serve(&cli.socket, cli.model.as_deref()) {
+        return match ipc::serve(&cli.socket, &cli.db_path(), cli.model.as_deref()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 log::error!("server error: {e}");
@@ -112,7 +123,7 @@ pub fn run() -> ExitCode {
     }
 
     if cli.daemon {
-        return match ipc::start_daemon(&cli.socket, cli.model.as_deref()) {
+        return match ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref()) {
             Ok(ipc::DaemonOutcome::Started) => status(fmt, "started", "daemon started"),
             Ok(ipc::DaemonOutcome::AlreadyRunning) => {
                 status(fmt, "already_running", "daemon already running")
@@ -162,7 +173,7 @@ pub fn run() -> ExitCode {
 /// The self-healing fallback: open the shared persistent engine and evaluate.
 /// Honors `--read-only` (expand without learning).
 fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::AnalysisPayload> {
-    let engine = Engine::open(&ipc::db_path(&cli.socket), cli.model.as_deref())?;
+    let engine = Engine::open(&cli.db_path(), cli.model.as_deref())?;
     if cli.read_only {
         engine.expand_only(text)
     } else {
@@ -184,7 +195,7 @@ fn run_batch(cli: &Cli, fmt: Format) -> ExitCode {
             Err(e) => return fail(fmt, &e),
         },
     };
-    let engine = match Engine::open(&ipc::db_path(&cli.socket), cli.model.as_deref()) {
+    let engine = match Engine::open(&cli.db_path(), cli.model.as_deref()) {
         Ok(e) => e,
         Err(e) => return fail(fmt, &format!("could not open engine: {e}")),
     };
@@ -254,6 +265,15 @@ pub fn determine_input(cli: &Cli) -> Result<String, String> {
     } else {
         Err("no input: pass text as an argument or pipe it via stdin".into())
     }
+}
+
+/// The default dictionary path under the per-user data dir.
+fn default_db_path() -> PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("ae").join("acronyms.db")
 }
 
 fn init_logging(verbose: bool) {

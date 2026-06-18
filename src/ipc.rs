@@ -51,12 +51,6 @@ pub fn lock_path(socket: &Path) -> PathBuf {
     socket.with_extension("lock")
 }
 
-/// The persistent database path, derived from the socket path so the daemon and
-/// any in-process fallback share one dictionary.
-pub fn db_path(socket: &Path) -> PathBuf {
-    socket.with_extension("db")
-}
-
 fn idle_timeout() -> Duration {
     let secs = std::env::var("AE_IDLE_SECS")
         .ok()
@@ -119,15 +113,19 @@ pub fn stop(socket: &Path) -> io::Result<bool> {
 }
 
 /// Spawn a detached daemon process for `socket`, waiting until it accepts
-/// connections. A no-op (`AlreadyRunning`) if one is already up. `model`
-/// forwards an explicit `--model` request to the daemon.
-pub fn start_daemon(socket: &Path, model: Option<&str>) -> io::Result<DaemonOutcome> {
+/// connections. A no-op (`AlreadyRunning`) if one is already up. `db` and
+/// `model` are forwarded so the daemon uses the same dictionary and embedder.
+pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<DaemonOutcome> {
     if UnixStream::connect(socket).is_ok() {
         return Ok(DaemonOutcome::AlreadyRunning);
     }
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--__serve").arg("--socket").arg(socket);
+    cmd.arg("--__serve")
+        .arg("--socket")
+        .arg(socket)
+        .arg("--db")
+        .arg(db);
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
@@ -154,7 +152,7 @@ pub fn start_daemon(socket: &Path, model: Option<&str>) -> io::Result<DaemonOutc
 /// Run the Leader: take the exclusive lock, bind the socket, and serve until
 /// told to stop or the janitor times out. Returns early (without error) if the
 /// lock is already held — another Leader won the election.
-pub fn serve(socket: &Path, model: Option<&str>) -> io::Result<()> {
+pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     let lock_file = File::create(lock_path(socket))?;
     if lock_file.try_lock_exclusive().is_err() {
         log::info!("another leader holds the lock; exiting");
@@ -167,9 +165,7 @@ pub fn serve(socket: &Path, model: Option<&str>) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     log::info!("leader listening on {}", socket.display());
 
-    let engine = Arc::new(Mutex::new(
-        Engine::open(&db_path(socket), model).map_err(to_io)?,
-    ));
+    let engine = Arc::new(Mutex::new(Engine::open(db, model).map_err(to_io)?));
     let active = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
 
@@ -257,10 +253,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn derived_paths_share_a_stem() {
+    fn lock_path_is_derived_from_the_socket() {
         let sock = PathBuf::from("/tmp/ae-x.sock");
         assert_eq!(lock_path(&sock), PathBuf::from("/tmp/ae-x.lock"));
-        assert_eq!(db_path(&sock), PathBuf::from("/tmp/ae-x.db"));
     }
 
     #[test]

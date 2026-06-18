@@ -56,9 +56,15 @@ ae [TEXT] [OPTIONS]
   -m, --model <SPEC>   embedding model: a path (dir or .onnx) or a name
   -d, --daemon         start a detached background leader
       --stop           stop the running background leader
+      --db <PATH>      acronym dictionary    [env: AE_DB] [default: data dir]
       --socket <PATH>  UDS path                      [default: /tmp/ae.sock]
   -v, --verbose        engine telemetry to stderr
 ```
+
+The learned dictionary persists in a SQLite database — by default
+`$XDG_DATA_HOME/ae/acronyms.db` (else `~/.local/share/ae/acronyms.db`), or
+wherever `--db`/`$AE_DB` points. The daemon and the in-process fallback share it,
+so acronyms learned in one invocation are available to the next.
 
 Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. stdin (when
 piped) wins; otherwise the positional `TEXT` is used; with nothing to do, `ae`
