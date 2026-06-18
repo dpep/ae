@@ -87,13 +87,19 @@ ae list                               # list everything
 ae list perf                          # filter by substring of acronym or expansion
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
+ae watch PB&J                         # declare a token is an acronym (mine it, never prune)
 ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
 ae define MVP                         # promote interactively (fzf), or pass expansions
-ae prune                              # GC: dedup + drop low-confidence/noise
+ae prune                              # GC: dedup (prefix + fuzzy) + drop low-confidence/noise
 ```
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
 learns; `ae add … -q` adds without printing).
+
+An acronym is **mine-worthy** (we hunt its expansions in later text) once it's
+either declared with `ae watch` or *observed* often enough — below that it's just
+noise and `ae prune` drops it. Punctuated acronyms like `PB&J`, `R&D`, `U.S.A`
+are detected and mined too (the `&`/`.` maps to a skipped filler word).
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An

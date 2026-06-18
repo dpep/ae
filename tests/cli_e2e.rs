@@ -527,6 +527,42 @@ fn analysis_matches_carry_validity_and_confidence() {
 }
 
 #[test]
+fn punctuated_acronym_is_a_candidate_and_mines() {
+    let sock = scratch_socket("pbj");
+    let a = run(&sock, &["-j"], Some("a PB&J is peanut butter and jelly"));
+    let v: serde_json::Value = serde_json::from_str(&a.stdout).unwrap();
+    assert!(
+        v["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "PB&J")
+    );
+
+    let s = run(
+        &sock,
+        &["suggest", "PB&J", "--min-confidence", "0", "-j"],
+        None,
+    );
+    let sv: serde_json::Value = serde_json::from_str(&s.stdout).unwrap();
+    assert!(
+        sv.as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["expansion"] == "peanut butter and jelly")
+    );
+}
+
+#[test]
+fn watch_declares_an_acronym() {
+    let sock = scratch_socket("watchcmd");
+    let out = run(&sock, &["watch", "MVP", "-j"], None);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["status"], "watching");
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));

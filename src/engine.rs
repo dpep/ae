@@ -5,12 +5,25 @@
 //! [`AnalysisPayload`]. The Leader holds one of these for the process lifetime;
 //! the fallback path builds an ephemeral one per invocation.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 use crate::embed::{Embedder, HashEmbedder};
 use crate::mrl::{compress_matryoshka_vector, cosine_similarity};
 use crate::store::Store;
 use crate::trie::SharedTrie;
 use crate::types::{AnalysisPayload, ExpansionResult, MatchCandidate};
 use crate::{learn, types::Extraction};
+
+/// An acronym must recur this often (or be user-declared) before we mine its
+/// expansions from unrelated text.
+const MINE_THRESHOLD: i64 = 2;
+
+/// Acronym-shaped tokens with internal punctuation (`PB&J`, `R&D`, `U.S.A`) that
+/// the plain alphanumeric tokenizer would split apart.
+static PUNCTUATED_ACRONYM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Z][A-Z0-9]*(?:[&.][A-Z0-9]+)+").unwrap());
 
 pub struct Engine {
     store: Store,
@@ -94,7 +107,7 @@ impl Engine {
     fn expand(&self, text: &str, query_vec: &[f32]) -> rusqlite::Result<Vec<ExpansionResult>> {
         let mut results: Vec<ExpansionResult> = Vec::new();
 
-        for token in tokens(text) {
+        for token in tokens(text).chain(punctuated_acronyms(text)) {
             if !self.trie.contains(token) {
                 continue;
             }
@@ -176,6 +189,12 @@ impl Engine {
         self.store.candidates()
     }
 
+    /// Declare a token is an acronym (user provenance) — see
+    /// [`Store::declare_acronym`].
+    pub fn declare_acronym(&self, acronym: &str) -> rusqlite::Result<()> {
+        self.store.declare_acronym(acronym)
+    }
+
     /// Speculative expansions mined for `acronym`, with occurrence counts.
     pub fn potentials_for(&self, acronym: &str) -> rusqlite::Result<Vec<(String, i64)>> {
         Ok(self
@@ -203,10 +222,10 @@ impl Engine {
             self.store.update_candidate_context(acronym, query_vec)?;
         }
 
-        // Cross-text lookout: scan this text for *other* watched candidates'
-        // expansions, scored by how well the text fits their usual context.
-        // (Length ≥ 3 to limit the noise short acronyms invite.)
-        for (acronym, _) in self.store.candidates()? {
+        // Cross-text lookout: scan this text for the expansions of *other*
+        // mine-worthy acronyms — user-declared, or observed often enough to be
+        // promoted from noise to mining (length ≥ 3 limits short-acronym noise).
+        for acronym in self.store.mineable_acronyms(MINE_THRESHOLD)? {
             if present.contains(&acronym) || acronym.chars().count() < 3 {
                 continue;
             }
@@ -245,7 +264,16 @@ fn is_filler(word: &str) -> bool {
 /// word must contribute a letter (the precision guard) and the phrase is
 /// anchored at content words on both ends. De-duplicated within the text.
 fn mine_potentials(text: &str, acronym: &str) -> Vec<String> {
-    let target: Vec<char> = acronym.chars().map(|c| c.to_ascii_uppercase()).collect();
+    // Letters only — punctuation in the acronym (PB&J, R&D) isn't a word
+    // initial; the '&'/dot maps to a filler word ("and") we already skip.
+    let target: Vec<char> = acronym
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if target.is_empty() {
+        return Vec::new();
+    }
     let words: Vec<&str> = text
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
@@ -290,6 +318,18 @@ fn tokens(text: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty())
 }
 
+/// Punctuated acronym mentions (`PB&J`, `R&D`) — 2–6 letters, all uppercase /
+/// digit / `&` / `.`, with at least one of `&`/`.`.
+fn punctuated_acronyms(text: &str) -> impl Iterator<Item = &str> {
+    PUNCTUATED_ACRONYM
+        .find_iter(text)
+        .map(|m| m.as_str())
+        .filter(|t| {
+            let letters = t.chars().filter(|c| c.is_ascii_uppercase()).count();
+            (2..=6).contains(&letters)
+        })
+}
+
 /// Acronym-shaped tokens in `text` that were neither expanded nor learned —
 /// distinct, in order of first appearance. These are acronyms `ae` *saw* but
 /// can't resolve, surfaced so the user can define them.
@@ -304,11 +344,26 @@ fn candidate_acronyms(
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for token in tokens(text) {
-        if !is_acronym_shaped(token) {
-            continue;
+
+    // Punctuated acronyms first, so we can suppress their split-apart parts
+    // (e.g. "PB&J" must not also surface "PB" and "J").
+    let mut covered = std::collections::HashSet::new();
+    for token in punctuated_acronyms(text) {
+        for part in token.split(|c: char| !c.is_alphanumeric()) {
+            if !part.is_empty() {
+                covered.insert(part.to_uppercase());
+            }
         }
         let upper = token.to_uppercase();
+        if !resolved.contains(&upper) && seen.insert(upper) {
+            out.push(token.to_string());
+        }
+    }
+    for token in tokens(text) {
+        let upper = token.to_uppercase();
+        if !is_acronym_shaped(token) || covered.contains(&upper) {
+            continue;
+        }
         if !resolved.contains(&upper) && seen.insert(upper) {
             out.push(token.to_string());
         }
@@ -499,15 +554,39 @@ mod tests {
     }
 
     #[test]
-    fn cross_text_mining_finds_a_definition_without_the_acronym() {
+    fn cross_text_mining_waits_for_the_promotion_threshold() {
         let e = Engine::in_memory().unwrap();
-        // MVP becomes a watched candidate here...
+        // Seen once → not yet mine-worthy; the later text isn't scanned for it.
         e.analyze("the MVP ships next week").unwrap();
-        // ...and is mined from a later text that never mentions it.
+        e.analyze("we scoped a minimum viable product for launch")
+            .unwrap();
+        assert!(e.potentials_for("MVP").unwrap().is_empty());
+
+        // Seen again → promoted; now cross-text mining picks the phrase up.
+        e.analyze("ping me about the MVP today").unwrap();
+        e.analyze("we shipped a minimum viable product").unwrap();
+        let pots = e.potentials_for("MVP").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+    }
+
+    #[test]
+    fn declaring_an_acronym_makes_it_mine_worthy_immediately() {
+        let e = Engine::in_memory().unwrap();
+        e.declare_acronym("MVP").unwrap();
+        // Never seen as a token, but a phrase in this text is mined for it.
         e.analyze("we scoped a minimum viable product for launch")
             .unwrap();
         let pots = e.potentials_for("MVP").unwrap();
         assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+    }
+
+    #[test]
+    fn punctuated_acronyms_are_detected_and_mined() {
+        let e = Engine::in_memory().unwrap();
+        let out = e.analyze("a PB&J is peanut butter and jelly").unwrap();
+        assert!(out.candidates.contains(&"PB&J".to_string()));
+        let pots = e.potentials_for("PB&J").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "peanut butter and jelly"));
     }
 
     #[test]

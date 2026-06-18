@@ -177,14 +177,25 @@ Views over the one table: `list`/`show` = confirmed (`user`/`inline`); `suggest`
 = `mined`; the trie hydrates from confirmed only (a mined-only acronym stays a
 candidate).
 
-### Acronym shapes & spelling (requested, next)
+### Acronym shapes & spelling
 
-- [ ] punctuated acronyms — `PB&J` = "peanut butter and jelly", `R&D`, `Ph.D`:
-      `is_acronym_shaped` + mining need to handle `&`/`.` (and `&` ⇒ "and")
-- [ ] fuzzy expansion detection — tolerate misspellings when matching a mined
-      phrase to an acronym (edit distance on word initials/words)
-- [ ] dictionary-based spell-check — error-correct detected expansions against a
-      word list; likely folded into `prune` (normalize during dedup)
+- [x] punctuated acronyms — `PB&J`, `R&D`, `U.S.A` detected + mined (the `&`/`.`
+      maps to a skipped filler word); split-apart parts (`PB`, `J`) suppressed
+- [x] fuzzy dedup at `prune` — merge expansions within a small edit distance
+      (Levenshtein), alongside the prefix merge
+- [ ] dictionary-based spell-check — error-correct detected expansion *words*
+      against the system word list (`/usr/share/dict/words` if present, else
+      skip), folded into `prune`. Not bundled
+
+### Candidate promotion (the 'is-acronym' continuum)
+
+- [x] an acronym is mine-worthy once user-declared (`ae watch`, source `user`)
+      or observed `count` >= `MINE_THRESHOLD`; cross-text mining is gated on it
+- [x] `ae watch <ACR>` declares a token an acronym; `prune` keeps user-declared
+      candidates and drops seldom-seen observed ones
+- [ ] tune `MINE_THRESHOLD`; expose mine-worthiness / source in `ae candidates`
+
+### Speculation — next steps
 
 ### Speculation — next steps
 

@@ -122,6 +122,9 @@ pub enum Command {
     },
     /// List candidate acronyms (seen but undefined) by frequency.
     Candidates,
+    /// Declare a token is an acronym — `ae` then always mines its expansions
+    /// and never prunes it, even before it's been seen often.
+    Watch { acronym: String },
     /// Suggest speculative expansions mined from text, with confidence.
     /// Optionally for one acronym.
     Suggest {
@@ -394,6 +397,15 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             min_confidence.unwrap_or(SUGGEST_MIN_CONFIDENCE),
             *limit,
         ),
+        Command::Watch { acronym } => match store.declare_acronym(acronym) {
+            Ok(()) => status(
+                fmt,
+                quiet,
+                "watching",
+                &format!("now watching {} for expansions", acronym.to_uppercase()),
+            ),
+            Err(e) => fail(fmt, &format!("watch failed: {e}")),
+        },
         Command::Add {
             acronym,
             expansions,

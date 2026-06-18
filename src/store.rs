@@ -44,10 +44,15 @@ CREATE INDEX IF NOT EXISTS idx_context_acronym
     ON acronym_contexts(acronym_id);
 
 -- Acronym-shaped tokens seen but not (yet) defined — the 'is this an acronym'
--- signal (per acronym, not per expansion), with how often each is seen.
+-- signal (per acronym, not per expansion). `source` is its provenance, mirroring
+-- expansions: 'user' (a person declared it via `ae watch`) vs 'observed' (ae
+-- auto-detected it in text). We mine expansions for an acronym once it's 'user'
+-- or has been observed `count` >= threshold times; pruning drops seldom-seen
+-- 'observed' ones and never 'user' ones.
 CREATE TABLE IF NOT EXISTS candidate_acronyms (
     acronym TEXT PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'observed',
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -109,6 +114,10 @@ impl Store {
                 [],
             );
         }
+        let _ = conn.execute(
+            "ALTER TABLE candidate_acronyms ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'",
+            [],
+        );
         Ok(Self { conn })
     }
 
@@ -155,6 +164,34 @@ impl Store {
             params![acronym],
         )?;
         Ok(())
+    }
+
+    /// Record that a person declared `acronym` to be an acronym (`source` =
+    /// `'user'`) — so its expansions are always mined and it's never pruned,
+    /// even before it's been seen often.
+    pub fn declare_acronym(&self, acronym: &str) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
+        if acronym.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO candidate_acronyms (acronym, source) VALUES (?1, 'user')
+             ON CONFLICT(acronym) DO UPDATE SET source = 'user'",
+            params![acronym],
+        )?;
+        Ok(())
+    }
+
+    /// Acronyms worth mining expansions for: user-declared, or observed at least
+    /// `min_count` times (promoted from noise to "of interest").
+    pub fn mineable_acronyms(&self, min_count: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym FROM candidate_acronyms WHERE source = 'user' OR count >= ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![min_count], |row| row.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Candidate acronyms with their occurrence counts, most-seen first.
@@ -270,10 +307,7 @@ impl Store {
 
         let mut clusters: Vec<(String, i64, f64)> = Vec::new();
         for (expansion, count, coh) in rows {
-            match clusters
-                .iter_mut()
-                .find(|c| prefix_compatible(&c.0, &expansion))
-            {
+            match clusters.iter_mut().find(|c| similar(&c.0, &expansion)) {
                 Some(c) => {
                     c.1 += count;
                     c.2 += coh;
@@ -303,7 +337,7 @@ impl Store {
     pub fn prune_noise_candidates(&self) -> Result<usize> {
         let n = self.conn.execute(
             "DELETE FROM candidate_acronyms
-             WHERE count <= 1
+             WHERE count <= 1 AND source != 'user'
                AND acronym NOT IN
                    (SELECT acronym FROM acronym_dictionary WHERE source = 'mined')",
             [],
@@ -517,6 +551,32 @@ pub fn source_validity(source: &str) -> f32 {
     }
 }
 
+/// Two mined expansions should be merged if they're prefix-compatible *or*
+/// within a small edit distance (a typo/misspelling) — the fuzzy dedup `prune`
+/// applies.
+fn similar(a: &str, b: &str) -> bool {
+    if prefix_compatible(a, b) {
+        return true;
+    }
+    let max_len = a.chars().count().max(b.chars().count());
+    levenshtein(a, b) <= (max_len / 8).max(1)
+}
+
+/// Levenshtein edit distance over chars.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur.push((prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 /// Two expansions are prefix-compatible if they have the same word count and
 /// each word pair is equal or one is a (≥3-char) prefix of the other — so
 /// "min viable product" ≈ "minimum viable product".
@@ -684,6 +744,33 @@ mod tests {
                 .any(|(e, c, _)| e == "minimum viable product" && *c == 2)
         );
         assert!(pots.iter().any(|(e, _, _)| e == "most valuable player"));
+    }
+
+    #[test]
+    fn dedup_merges_a_misspelled_variant() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_potential("MVP", "minimum viable product", 1.0)
+            .unwrap();
+        s.record_potential("MVP", "minimum viable prodcut", 1.0)
+            .unwrap(); // typo
+        assert_eq!(s.dedup_potentials("MVP").unwrap(), 1);
+        assert_eq!(s.potentials_for("MVP").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn declared_acronyms_are_mineable_and_survive_pruning() {
+        let s = Store::open_in_memory().unwrap();
+        s.declare_acronym("MVP").unwrap();
+        s.record_candidate("XX").unwrap(); // observed once → prunable noise
+        assert!(s.mineable_acronyms(2).unwrap().contains(&"MVP".to_string()));
+        s.prune_noise_candidates().unwrap();
+        let acrs: Vec<String> = s
+            .candidates()
+            .unwrap()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert!(acrs.contains(&"MVP".to_string()) && !acrs.contains(&"XX".to_string()));
     }
 
     #[test]
