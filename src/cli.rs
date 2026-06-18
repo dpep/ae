@@ -368,7 +368,7 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
         Command::Show { acronym } => {
             let entries = store.expansions_for(acronym).map(|rows| {
                 rows.into_iter()
-                    .map(|(_, e)| (acronym.to_uppercase(), e))
+                    .map(|(_, e, source)| (acronym.to_uppercase(), e, source))
                     .collect()
             });
             emit_entries(fmt, entries)
@@ -425,7 +425,7 @@ fn run_add(
     expansions: &[String],
 ) -> ExitCode {
     for expansion in expansions {
-        if let Err(e) = store.add_entry(acronym, expansion) {
+        if let Err(e) = store.add_entry(acronym, expansion, "user") {
             return fail(fmt, &format!("add failed: {e}"));
         }
     }
@@ -598,7 +598,7 @@ fn run_define(
 
     let acronym_upper = acronym.to_uppercase();
     for expansion in &chosen {
-        if let Err(e) = store.add_entry(acronym, expansion) {
+        if let Err(e) = store.add_entry(acronym, expansion, "user") {
             return fail(fmt, &format!("add failed: {e}"));
         }
     }
@@ -705,7 +705,7 @@ fn run_rm(
         return removed_status(fmt, quiet, &acronym, 0);
     }
 
-    let all_exps: Vec<String> = variants.iter().map(|(_, e)| e.clone()).collect();
+    let all_exps: Vec<String> = variants.iter().map(|(_, e, _)| e.clone()).collect();
     let targets: Vec<String> = if all {
         all_exps
     } else if let Some(pat) = pattern {
@@ -783,8 +783,8 @@ fn refuse(fmt: Format, acronym: &str, reason: &str, expansions: &[String]) -> Ex
     ExitCode::FAILURE
 }
 
-/// Render a list of `(acronym, expansion)` entries, or report the error.
-fn emit_entries(fmt: Format, entries: rusqlite::Result<Vec<(String, String)>>) -> ExitCode {
+/// Render a list of `(acronym, expansion, source)` entries, or report the error.
+fn emit_entries(fmt: Format, entries: rusqlite::Result<Vec<(String, String, String)>>) -> ExitCode {
     match entries {
         Ok(entries) => {
             let stdout = io::stdout();

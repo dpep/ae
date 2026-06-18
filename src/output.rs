@@ -29,10 +29,11 @@ fn render_human(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Res
     }
     for r in &payload.expansions {
         for m in &r.matches {
+            // validity = is this a real expansion; confidence = fit for this context.
             writeln!(
                 out,
-                "{:<8} {:<40} expansion {:.2}",
-                r.acronym, m.expansion, m.confidence
+                "{:<8} {:<40} expansion  v{:.2} c{:.2}",
+                r.acronym, m.expansion, m.validity, m.confidence
             )?;
         }
     }
@@ -49,10 +50,11 @@ fn render_human(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Res
     Ok(())
 }
 
-/// Render a list of `(acronym, expansion)` dictionary entries (list/show/search).
+/// Render `(acronym, expansion, source)` dictionary entries (list/show). The
+/// `source` (user/inline) is shown so the verified status is visible.
 pub fn render_entries(
     out: &mut impl Write,
-    entries: &[(String, String)],
+    entries: &[(String, String, String)],
     format: Format,
 ) -> std::io::Result<()> {
     match format {
@@ -60,23 +62,25 @@ pub fn render_entries(
             if entries.is_empty() {
                 return writeln!(out, "No acronyms.");
             }
-            for (acronym, expansion) in entries {
-                writeln!(out, "{acronym:<8} {expansion}")?;
+            for (acronym, expansion, source) in entries {
+                writeln!(out, "{acronym:<8} {expansion:<40} {source}")?;
             }
         }
         Format::Json => {
             let rows: Vec<_> = entries
                 .iter()
-                .map(|(a, e)| json!({ "acronym": a, "expansion": e }))
+                .map(|(a, e, s)| {
+                    json!({ "acronym": a, "expansion": e, "source": s, "verified": s == "user" })
+                })
                 .collect();
             writeln!(out, "{}", serde_json::to_string_pretty(&rows).unwrap())?;
         }
         Format::Ndjson => {
-            for (acronym, expansion) in entries {
+            for (acronym, expansion, source) in entries {
                 writeln!(
                     out,
                     "{}",
-                    json!({ "acronym": acronym, "expansion": expansion })
+                    json!({ "acronym": acronym, "expansion": expansion, "source": source, "verified": source == "user" })
                 )?;
             }
         }
@@ -270,6 +274,7 @@ fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Re
                 "acronym": r.acronym,
                 "text_slice": r.text_slice,
                 "expansion": m.expansion,
+                "validity": m.validity,
                 "confidence": m.confidence,
             });
             writeln!(out, "{line}")?;
@@ -305,6 +310,7 @@ mod tests {
                 text_slice: "KPI".into(),
                 matches: vec![MatchCandidate {
                     expansion: "Key Performance Indicator".into(),
+                    validity: 1.0,
                     confidence: 0.8,
                 }],
             }],

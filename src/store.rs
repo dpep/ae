@@ -16,11 +16,20 @@ const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 
+-- One row per (acronym, expansion). `source` places each on the validity
+-- continuum: 'user' (a human asserted it — verified) > 'inline' (defined in the
+-- text) > 'mined' (speculative — initials match). `count`/`coh_sum` track the
+-- recurrence and context coherence behind a mined expansion (0 for confirmed
+-- ones); a mined row that's later confirmed simply upgrades its source.
 CREATE TABLE IF NOT EXISTS acronym_dictionary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     acronym TEXT NOT NULL,
     expansion TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    source TEXT NOT NULL DEFAULT 'user',
+    count INTEGER NOT NULL DEFAULT 0,
+    coh_sum REAL NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_acronym_lookup
@@ -34,26 +43,13 @@ CREATE TABLE IF NOT EXISTS acronym_contexts (
 CREATE INDEX IF NOT EXISTS idx_context_acronym
     ON acronym_contexts(acronym_id);
 
--- Acronym-shaped tokens seen but not (yet) defined, with how often.
+-- Acronym-shaped tokens seen but not (yet) defined — the 'is this an acronym'
+-- signal (per acronym, not per expansion), with how often each is seen.
 CREATE TABLE IF NOT EXISTS candidate_acronyms (
     acronym TEXT PRIMARY KEY,
     count INTEGER NOT NULL DEFAULT 1,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Speculative expansions for candidates: phrases whose word-initials spell the
--- acronym, mined from text that mentions it (or, later, that doesn't).
--- `count` is recurrence (stats); `coh_sum` accumulates the vector coherence of
--- the contexts they were mined from. Together they drive confidence.
-CREATE TABLE IF NOT EXISTS potential_expansions (
-    acronym TEXT NOT NULL,
-    expansion TEXT NOT NULL,
-    count INTEGER NOT NULL DEFAULT 1,
-    coh_sum REAL NOT NULL DEFAULT 0,
-    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (acronym, expansion)
 );
 
 -- Running-mean context embedding per candidate acronym: where it tends to be
@@ -100,25 +96,44 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
-        // Migration for DBs created before coherence tracking (ignore the
-        // "duplicate column" error on fresh DBs that already have it).
-        let _ = conn.execute(
-            "ALTER TABLE potential_expansions ADD COLUMN coh_sum REAL NOT NULL DEFAULT 0",
-            [],
-        );
+        // Migrations for older DBs (the "duplicate column" error on fresh DBs
+        // that already have the column is harmless and ignored).
+        for column in [
+            "source TEXT NOT NULL DEFAULT 'user'",
+            "count INTEGER NOT NULL DEFAULT 0",
+            "coh_sum REAL NOT NULL DEFAULT 0",
+            "last_seen TIMESTAMP",
+        ] {
+            let _ = conn.execute(
+                &format!("ALTER TABLE acronym_dictionary ADD COLUMN {column}"),
+                [],
+            );
+        }
         Ok(Self { conn })
     }
 
-    /// Insert an `(acronym, expansion)` pair, returning its row id. Acronyms are
-    /// stored uppercased. Idempotent: an existing pair returns its current id.
-    pub fn add_entry(&self, acronym: &str, expansion: &str) -> Result<i64> {
+    /// Insert an `(acronym, expansion)` pair from `source` (`"user"`, `"inline"`,
+    /// or `"mined"`), returning its row id. Idempotent; a re-add only *upgrades*
+    /// the source if the new one is stronger (mined < inline < user).
+    pub fn add_entry(&self, acronym: &str, expansion: &str, source: &str) -> Result<i64> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim();
         self.conn.execute(
-            "INSERT OR IGNORE INTO acronym_dictionary (acronym, expansion) VALUES (?1, ?2)",
-            params![acronym, expansion],
+            "INSERT OR IGNORE INTO acronym_dictionary (acronym, expansion, source) VALUES (?1, ?2, ?3)",
+            params![acronym, expansion, source],
         )?;
-        // It's now defined, so it's no longer an open candidate.
+        let current: String = self.conn.query_row(
+            "SELECT source FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
+            params![acronym, expansion],
+            |row| row.get(0),
+        )?;
+        if source_rank(source) > source_rank(&current) {
+            self.conn.execute(
+                "UPDATE acronym_dictionary SET source = ?3 WHERE acronym = ?1 AND expansion = ?2",
+                params![acronym, expansion, source],
+            )?;
+        }
+        // It's confirmed now, so it's no longer an open candidate / speculation.
         self.clear_candidate(&acronym)?;
         self.conn.query_row(
             "SELECT id FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
@@ -159,8 +174,9 @@ impl Store {
             "DELETE FROM candidate_acronyms WHERE acronym = ?1",
             params![acronym],
         )?;
+        // Drop the *speculative* rows only; confirmed expansions stay.
         self.conn.execute(
-            "DELETE FROM potential_expansions WHERE acronym = ?1",
+            "DELETE FROM acronym_dictionary WHERE acronym = ?1 AND source = 'mined'",
             params![acronym],
         )?;
         self.conn.execute(
@@ -170,8 +186,9 @@ impl Store {
         Ok(())
     }
 
-    /// Record one sighting of a speculative expansion, with the vector coherence
-    /// of the context it was mined from (accumulated into `coh_sum`).
+    /// Record one sighting of a speculative (`mined`) expansion, with the vector
+    /// coherence of the context it was mined from (accumulated into `coh_sum`).
+    /// A pair that's already confirmed keeps its stronger source.
     pub fn record_potential(&self, acronym: &str, expansion: &str, coherence: f32) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim().to_lowercase();
@@ -179,8 +196,8 @@ impl Store {
             return Ok(());
         }
         self.conn.execute(
-            "INSERT INTO potential_expansions (acronym, expansion, count, coh_sum)
-             VALUES (?1, ?2, 1, ?3)
+            "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum)
+             VALUES (?1, ?2, 'mined', 1, ?3)
              ON CONFLICT(acronym, expansion) DO UPDATE
                SET count = count + 1, coh_sum = coh_sum + ?3, last_seen = CURRENT_TIMESTAMP",
             params![acronym, expansion, coherence as f64],
@@ -192,8 +209,8 @@ impl Store {
     pub fn potentials_for(&self, acronym: &str) -> Result<Vec<(String, i64, f64)>> {
         let acronym = acronym.trim().to_uppercase();
         let mut stmt = self.conn.prepare(
-            "SELECT expansion, count, coh_sum FROM potential_expansions
-             WHERE acronym = ?1 ORDER BY count DESC, expansion",
+            "SELECT expansion, count, coh_sum FROM acronym_dictionary
+             WHERE acronym = ?1 AND source = 'mined' ORDER BY count DESC, expansion",
         )?;
         let rows = stmt
             .query_map(params![acronym], |row| {
@@ -206,8 +223,8 @@ impl Store {
     /// All speculative `(acronym, expansion, count, coh_sum)` rows, for `suggest`.
     pub fn all_potentials(&self) -> Result<Vec<(String, String, i64, f64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT acronym, expansion, count, coh_sum FROM potential_expansions
-             ORDER BY acronym, count DESC, expansion",
+            "SELECT acronym, expansion, count, coh_sum FROM acronym_dictionary
+             WHERE source = 'mined' ORDER BY acronym, count DESC, expansion",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -221,7 +238,7 @@ impl Store {
     pub fn distinct_potential_acronyms(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT DISTINCT acronym FROM potential_expansions")?;
+            .prepare("SELECT DISTINCT acronym FROM acronym_dictionary WHERE source = 'mined'")?;
         let rows = stmt
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>>>()?;
@@ -231,7 +248,8 @@ impl Store {
     /// Delete one speculative expansion. Returns the number of rows removed.
     pub fn delete_potential(&self, acronym: &str, expansion: &str) -> Result<usize> {
         let n = self.conn.execute(
-            "DELETE FROM potential_expansions WHERE acronym = ?1 AND expansion = ?2",
+            "DELETE FROM acronym_dictionary
+             WHERE acronym = ?1 AND expansion = ?2 AND source = 'mined'",
             params![
                 acronym.trim().to_uppercase(),
                 expansion.trim().to_lowercase()
@@ -267,13 +285,13 @@ impl Store {
             return Ok(0);
         }
         self.conn.execute(
-            "DELETE FROM potential_expansions WHERE acronym = ?1",
+            "DELETE FROM acronym_dictionary WHERE acronym = ?1 AND source = 'mined'",
             params![acronym],
         )?;
         for (expansion, count, coh) in &clusters {
             self.conn.execute(
-                "INSERT INTO potential_expansions (acronym, expansion, count, coh_sum)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum)
+                 VALUES (?1, ?2, 'mined', ?3, ?4)",
                 params![acronym, expansion, count, coh],
             )?;
         }
@@ -285,7 +303,9 @@ impl Store {
     pub fn prune_noise_candidates(&self) -> Result<usize> {
         let n = self.conn.execute(
             "DELETE FROM candidate_acronyms
-             WHERE count <= 1 AND acronym NOT IN (SELECT acronym FROM potential_expansions)",
+             WHERE count <= 1
+               AND acronym NOT IN
+                   (SELECT acronym FROM acronym_dictionary WHERE source = 'mined')",
             [],
         )?;
         self.conn.execute(
@@ -343,63 +363,71 @@ impl Store {
     }
 
     /// Seed the built-in dictionary if the table is empty. Returns the number of
-    /// rows inserted.
+    /// rows inserted. Built-ins are curated, so they count as `"user"`-verified.
     pub fn seed_defaults(&self) -> Result<usize> {
         if self.count()? > 0 {
             return Ok(0);
         }
         let mut n = 0;
         for (acr, exp) in DEFAULT_DICTIONARY {
-            self.add_entry(acr, exp)?;
+            self.add_entry(acr, exp, "user")?;
             n += 1;
         }
         Ok(n)
     }
 
-    /// All `(id, expansion)` rows for `acronym` (case-insensitive).
-    pub fn expansions_for(&self, acronym: &str) -> Result<Vec<(i64, String)>> {
+    /// All `(id, expansion, source)` rows for `acronym` (case-insensitive).
+    pub fn expansions_for(&self, acronym: &str) -> Result<Vec<(i64, String, String)>> {
         let acronym = acronym.trim().to_uppercase();
         let mut stmt = self.conn.prepare(
-            "SELECT id, expansion FROM acronym_dictionary WHERE acronym = ?1 ORDER BY id",
+            "SELECT id, expansion, source FROM acronym_dictionary
+             WHERE acronym = ?1 AND source IN ('user', 'inline') ORDER BY id",
         )?;
         let rows = stmt
-            .query_map(params![acronym], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![acronym], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// Every distinct acronym — used to hydrate the trie.
+    /// Every distinct *confirmed* acronym — used to hydrate the trie. (A
+    /// mined-only acronym stays a candidate, so it isn't expanded.)
     pub fn all_acronyms(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT acronym FROM acronym_dictionary ORDER BY acronym")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT acronym FROM acronym_dictionary
+             WHERE source IN ('user', 'inline') ORDER BY acronym",
+        )?;
         let rows = stmt
             .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// Every `(acronym, expansion)` pair, ordered — for `list`.
-    pub fn all_entries(&self) -> Result<Vec<(String, String)>> {
+    /// Every `(acronym, expansion, source)` row, ordered — for `list`.
+    pub fn all_entries(&self) -> Result<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT acronym, expansion FROM acronym_dictionary ORDER BY acronym, expansion",
+            "SELECT acronym, expansion, source FROM acronym_dictionary
+             WHERE source IN ('user', 'inline') ORDER BY acronym, expansion",
         )?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
 
     /// Entries whose acronym or expansion contains `query` (case-insensitive).
-    pub fn search(&self, query: &str) -> Result<Vec<(String, String)>> {
+    pub fn search(&self, query: &str) -> Result<Vec<(String, String, String)>> {
         let pattern = format!("%{}%", query.trim());
         let mut stmt = self.conn.prepare(
-            "SELECT acronym, expansion FROM acronym_dictionary
-             WHERE acronym LIKE ?1 OR expansion LIKE ?1
+            "SELECT acronym, expansion, source FROM acronym_dictionary
+             WHERE source IN ('user', 'inline') AND (acronym LIKE ?1 OR expansion LIKE ?1)
              ORDER BY acronym, expansion",
         )?;
         let rows = stmt
-            .query_map(params![pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![pattern], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -436,11 +464,13 @@ impl Store {
         Ok(n)
     }
 
+    /// Number of *confirmed* expansions — gates default seeding.
     pub fn count(&self) -> Result<i64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM acronym_dictionary", [], |row| {
-                row.get(0)
-            })
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM acronym_dictionary WHERE source IN ('user', 'inline')",
+            [],
+            |row| row.get(0),
+        )
     }
 
     /// Attach a compressed (64-d) context embedding to a dictionary entry.
@@ -465,6 +495,25 @@ impl Store {
             })?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
+    }
+}
+
+/// Strength ordering of a confirmed expansion's source.
+pub fn source_rank(source: &str) -> u8 {
+    match source {
+        "user" => 2,
+        "inline" => 1,
+        _ => 0,
+    }
+}
+
+/// Validity — P(this is a real expansion of the acronym) — from the source: a
+/// human assertion is certain, an inline definition nearly so.
+pub fn source_validity(source: &str) -> f32 {
+    match source {
+        "user" => 1.0,
+        "inline" => 0.9,
+        _ => 0.0,
     }
 }
 
@@ -509,25 +558,52 @@ mod tests {
     #[test]
     fn add_and_look_up_an_entry() {
         let s = Store::open_in_memory().unwrap();
-        let id = s.add_entry("kpi", "Key Performance Indicator").unwrap();
+        let id = s
+            .add_entry("kpi", "Key Performance Indicator", "user")
+            .unwrap();
         let rows = s.expansions_for("KPI").unwrap();
-        assert_eq!(rows, vec![(id, "Key Performance Indicator".to_string())]);
+        assert_eq!(
+            rows,
+            vec![(
+                id,
+                "Key Performance Indicator".to_string(),
+                "user".to_string()
+            )]
+        );
     }
 
     #[test]
     fn duplicate_pairs_are_idempotent() {
         let s = Store::open_in_memory().unwrap();
-        let a = s.add_entry("KPI", "Key Performance Indicator").unwrap();
-        let b = s.add_entry("KPI", "Key Performance Indicator").unwrap();
+        let a = s
+            .add_entry("KPI", "Key Performance Indicator", "user")
+            .unwrap();
+        let b = s
+            .add_entry("KPI", "Key Performance Indicator", "user")
+            .unwrap();
         assert_eq!(a, b);
         assert_eq!(s.count().unwrap(), 1);
     }
 
     #[test]
+    fn source_upgrades_but_never_downgrades() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_entry("MVP", "Minimum Viable Product", "inline")
+            .unwrap();
+        s.add_entry("MVP", "Minimum Viable Product", "user")
+            .unwrap(); // upgrade
+        s.add_entry("MVP", "Minimum Viable Product", "inline")
+            .unwrap(); // weaker, ignored
+        let rows = s.expansions_for("MVP").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].2, "user");
+    }
+
+    #[test]
     fn one_acronym_can_have_several_expansions() {
         let s = Store::open_in_memory().unwrap();
-        s.add_entry("PT", "Physical Therapy").unwrap();
-        s.add_entry("PT", "Part Time").unwrap();
+        s.add_entry("PT", "Physical Therapy", "user").unwrap();
+        s.add_entry("PT", "Part Time", "user").unwrap();
         assert_eq!(s.expansions_for("PT").unwrap().len(), 2);
     }
 
@@ -541,14 +617,20 @@ mod tests {
     #[test]
     fn search_matches_acronym_or_expansion() {
         let s = Store::open_in_memory().unwrap();
-        s.add_entry("KPI", "Key Performance Indicator").unwrap();
-        s.add_entry("OKR", "Objectives and Key Results").unwrap();
+        s.add_entry("KPI", "Key Performance Indicator", "user")
+            .unwrap();
+        s.add_entry("OKR", "Objectives and Key Results", "user")
+            .unwrap();
         // Matches on the expansion text ("Key" appears in both).
         assert_eq!(s.search("key").unwrap().len(), 2);
         // Matches on the acronym.
         assert_eq!(
             s.search("kpi").unwrap(),
-            vec![("KPI".into(), "Key Performance Indicator".into())]
+            vec![(
+                "KPI".into(),
+                "Key Performance Indicator".into(),
+                "user".into()
+            )]
         );
         assert!(s.search("nope").unwrap().is_empty());
     }
@@ -556,8 +638,8 @@ mod tests {
     #[test]
     fn delete_removes_entries_and_is_counted() {
         let s = Store::open_in_memory().unwrap();
-        s.add_entry("PT", "Physical Therapy").unwrap();
-        s.add_entry("PT", "Part Time").unwrap();
+        s.add_entry("PT", "Physical Therapy", "user").unwrap();
+        s.add_entry("PT", "Part Time", "user").unwrap();
         assert_eq!(s.delete_entry("PT", "Part Time").unwrap(), 1);
         assert_eq!(s.expansions_for("PT").unwrap().len(), 1);
         assert_eq!(s.delete_acronym("PT").unwrap(), 1);
@@ -578,7 +660,8 @@ mod tests {
             vec![("MVP".into(), 2), ("ABC".into(), 1)]
         );
         // Defining it removes it from the candidate list.
-        s.add_entry("MVP", "Minimum Viable Product").unwrap();
+        s.add_entry("MVP", "Minimum Viable Product", "user")
+            .unwrap();
         assert_eq!(s.candidates().unwrap(), vec![("ABC".into(), 1)]);
     }
 
@@ -623,7 +706,9 @@ mod tests {
     #[test]
     fn context_embeddings_round_trip() {
         let s = Store::open_in_memory().unwrap();
-        let id = s.add_entry("KPI", "Key Performance Indicator").unwrap();
+        let id = s
+            .add_entry("KPI", "Key Performance Indicator", "user")
+            .unwrap();
         let v: Vec<f32> = (0..MRL_DIMS).map(|i| i as f32 / 10.0).collect();
         s.add_context(id, &v).unwrap();
         let back = s.contexts_for(id).unwrap();

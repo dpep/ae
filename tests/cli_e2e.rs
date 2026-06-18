@@ -502,6 +502,31 @@ fn suggest_limit_caps_per_acronym() {
 }
 
 #[test]
+fn list_marks_verified_source() {
+    let sock = scratch_socket("verified");
+    run(&sock, &["add", "ZZ", "Zig Zag"], None);
+    let out = run(&sock, &["list", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["acronym"] == "ZZ" && r["source"] == "user" && r["verified"] == true)
+    );
+}
+
+#[test]
+fn analysis_matches_carry_validity_and_confidence() {
+    let sock = scratch_socket("validity");
+    let out = run(&sock, &["-j"], Some("Check the OKR board."));
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let m = &v["expansions"][0]["matches"][0];
+    // OKR is a curated (user) default → fully valid.
+    assert_eq!(m["validity"], 1.0);
+    assert!(m["confidence"].as_f64().is_some());
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));

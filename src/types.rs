@@ -6,10 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One candidate expansion for a known acronym, with a confidence in `[0, 1]`.
+/// One candidate expansion for a known acronym. Two scores: `validity` —
+/// P(this is a real expansion of the acronym) — and `confidence` — P(it's the
+/// meaning *here*, from how well the context fits).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MatchCandidate {
     pub expansion: String,
+    pub validity: f32,
     pub confidence: f32,
 }
 

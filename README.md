@@ -14,12 +14,19 @@ Feed it text; it sorts the acronyms into three buckets at once:
 ```sh
 $ ae "Our KPI (Key Performance Indicator) gates the OKR review, then the MVP."
 KPI  Key Performance Indicator        extraction 0.95
-OKR  Objectives and Key Results       expansion  0.80
+OKR  Objectives and Key Results       expansion  v1.00 c0.80
 MVP  (no expansion)                   candidate
 
 $ cat notes.md | ae -j
 { "sentence": "...", "expansions": [...], "extractions": [...], "candidates": [...] }
 ```
+
+Expansions carry two scores: **validity** (`v` — is this a real expansion of the
+acronym; 1.0 when a human verified it, 0.9 for an inline definition) and
+**confidence** (`c` — does it fit *this* sentence, from context vectors). Under
+the hood every `(acronym, expansion)` lives on one continuum by `source`:
+`user` (verified) > `inline` > `mined` (speculative) — `ae list` shows the
+`source`/`verified` of each, `ae suggest` shows the speculative tail.
 
 ## Why
 

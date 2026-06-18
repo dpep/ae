@@ -103,21 +103,25 @@ impl Engine {
                 continue; // already handled this acronym in this sentence
             }
 
-            let rows = self.store.expansions_for(&acronym)?;
-            let n = rows.len();
-            let mut matches: Vec<MatchCandidate> = rows
+            let mut matches: Vec<MatchCandidate> = self
+                .store
+                .expansions_for(&acronym)?
                 .into_iter()
-                .map(|(id, expansion)| {
-                    let confidence = self.confidence(id, n, query_vec)?;
+                .map(|(id, expansion, source)| {
                     Ok(MatchCandidate {
                         expansion,
-                        confidence,
+                        validity: crate::store::source_validity(&source),
+                        confidence: self.contextual(id, query_vec)?,
                     })
                 })
                 .collect::<rusqlite::Result<_>>()?;
 
-            // Best candidate first.
-            matches.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+            // Best fit for *this* context first, then most-valid.
+            matches.sort_by(|a, b| {
+                b.confidence
+                    .total_cmp(&a.confidence)
+                    .then(b.validity.total_cmp(&a.validity))
+            });
 
             if !matches.is_empty() {
                 results.push(ExpansionResult {
@@ -130,21 +134,21 @@ impl Engine {
         Ok(results)
     }
 
-    /// Confidence for one expansion: a prior (lower when the acronym is
-    /// ambiguous) lifted by how well the query matches any recorded context.
-    fn confidence(&self, id: i64, n_expansions: usize, query_vec: &[f32]) -> rusqlite::Result<f32> {
-        let prior = if n_expansions <= 1 { 0.8 } else { 0.5 };
+    /// Contextual likelihood for one expansion: how well the query sentence
+    /// matches the expansion's recorded contexts (`0.5` — neutral — with no
+    /// evidence yet). This is P(expansion | acronym, context), distinct from
+    /// validity.
+    fn contextual(&self, id: i64, query_vec: &[f32]) -> rusqlite::Result<f32> {
         let contexts = self.store.contexts_for(id)?;
         if contexts.is_empty() {
-            return Ok(prior);
+            return Ok(0.5);
         }
         let best = contexts
             .iter()
             .map(|c| cosine_similarity(query_vec, c))
             .fold(0.0_f32, f32::max)
             .clamp(0.0, 1.0);
-        // Evidence can only raise confidence above the floor.
-        Ok((0.5 + 0.5 * best).max(prior).min(1.0))
+        Ok(best)
     }
 
     /// Stage 2 — extract inline definitions, persist them (dictionary + trie +
@@ -152,7 +156,9 @@ impl Engine {
     fn learn_and_persist(&self, text: &str) -> rusqlite::Result<Vec<Extraction>> {
         let learned = learn::extract(text);
         for c in &learned {
-            let id = self.store.add_entry(&c.acronym, &c.extracted_definition)?;
+            let id = self
+                .store
+                .add_entry(&c.acronym, &c.extracted_definition, "inline")?;
             self.trie.insert(&c.acronym);
             let ctx = compress_matryoshka_vector(&self.embedder.embed(&c.extracted_definition));
             self.store.add_context(id, &ctx)?;

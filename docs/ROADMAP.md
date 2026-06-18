@@ -156,23 +156,35 @@ commit.
 - [x] `suggest` — higher default floor (0.30 vs prune's 0.15), `--min-confidence`
       override, `-l/--limit N` per acronym; `define` shows *all* (diagnostic)
 
-## Proposed: one confidence-scored model (needs buy-in before migrating)
+## Unified confidence model (done)
 
-Today "known" (dictionary) and "potential" (speculative) expansions are separate
-tables. They're really the same thing at different confidence. Proposed unified
-model — an `(acronym, expansion)` with:
+Known and speculative expansions are now **one table** (`acronym_dictionary`),
+one row per `(acronym, expansion)`, differentiated by `source` on a validity
+continuum: `user` (verified by a human) > `inline` (defined in the text) >
+`mined` (speculative). Re-adding only *upgrades* the source; a mined phrase that
+gets confirmed becomes verified in place. `candidate_acronyms` stays separate —
+it's the per-*acronym* "is-this-an-acronym" signal, a different entity.
 
-- `verified: bool` — a human asserted it (`add`/`define`). Huge signal that the
-  expansion is *valid*, though not that it's *the* one for a given mention.
-- a **validity** score — P(expansion is a real expansion of the acronym): 1.0
-  when verified, else the mined confidence (recurrence + coherence).
-- decomposed scores worth modeling separately:
-  1. **is-acronym** — P(token is an acronym) (today: shape + candidate freq)
-  2. **expansion-validity** — P(expansion valid for acronym) (verified vs mined)
-  3. **contextual-likelihood** — P(expansion | acronym, sentence) (today: the
-     cosine-context term in expansion ranking)
+The three scores are explicit:
+1. **is-acronym** — candidate detection (shape) + `candidate_acronyms` frequency.
+2. **expansion-validity** — `source_validity()`: user 1.0, inline 0.9, mined =
+   the recurrence+coherence confidence. Surfaced as `validity` on a match and
+   `verified`/`source` in `list`/`show`.
+3. **contextual-likelihood** — `Engine::contextual()`: cosine of the sentence
+   against the expansion's recorded contexts. Surfaced as `confidence`.
 
-Migration touches the dictionary/trie/expand path, so it's gated on sign-off.
+Views over the one table: `list`/`show` = confirmed (`user`/`inline`); `suggest`
+= `mined`; the trie hydrates from confirmed only (a mined-only acronym stays a
+candidate).
+
+### Acronym shapes & spelling (requested, next)
+
+- [ ] punctuated acronyms — `PB&J` = "peanut butter and jelly", `R&D`, `Ph.D`:
+      `is_acronym_shaped` + mining need to handle `&`/`.` (and `&` ⇒ "and")
+- [ ] fuzzy expansion detection — tolerate misspellings when matching a mined
+      phrase to an acronym (edit distance on word initials/words)
+- [ ] dictionary-based spell-check — error-correct detected expansions against a
+      word list; likely folded into `prune` (normalize during dedup)
 
 ### Speculation — next steps
 
