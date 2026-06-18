@@ -93,12 +93,20 @@ commit.
    disconnect" trigger is approximated by an idle-connection timeout, which is
    the portable, testable equivalent.
 
+## CLI ergonomics (machine-friendly surface)
+
+- [x] `-j/--json` + `-J/--ndjson` everywhere; `--format` removed in favor of them
+- [x] all commands emit structured status (`--daemon`/`--stop` → `{"status":…}`)
+- [x] `--read-only` (`-r`) — expand without learning/persisting
+- [x] `--batch` (`-b`) — line-by-line aggregation with `line:col` hits
+- [x] `--file` (`-f`) — read a file, implies batch
+- [x] bare invocation (no input, interactive) prints `--help`
+
 ## Feature requests / backlog
 
 - [ ] `vec0` virtual-table storage when `sqlite-vec` is available.
 - [ ] Bump `MRL_DIMS` to 128 (better disambiguation for the non-MRL model).
 - [ ] `ae --add ACR "Expansion"` to seed the dictionary from the CLI.
-- [ ] `ndjson` streaming for multi-line piped input (one payload per line).
 - [ ] Confidence calibration for learned candidates from real corpora.
 - [ ] Homebrew: validate the formula's ONNX-Runtime + bundled-model build on a
       clean machine (sandbox network constraints).

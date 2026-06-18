@@ -29,7 +29,12 @@ const MAX_FRAME: u32 = 64 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Request {
-    Analyze { text: String },
+    Analyze {
+        text: String,
+        /// Expand only — don't extract or persist new acronyms.
+        #[serde(default)]
+        read_only: bool,
+    },
     Stop,
     Ping,
 }
@@ -85,12 +90,14 @@ fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
 
 // ---- follower / client ---------------------------------------------------
 
-/// Proxy `text` to a running Leader and return its analysis. Returns `Err` when
-/// no Leader is reachable, which the caller treats as "fall back in-process".
-pub fn run_follower(socket: &Path, text: &str) -> io::Result<AnalysisPayload> {
+/// Proxy `text` to a running Leader and return its analysis. `read_only`
+/// requests expansion without learning. Returns `Err` when no Leader is
+/// reachable, which the caller treats as "fall back in-process".
+pub fn run_follower(socket: &Path, text: &str, read_only: bool) -> io::Result<AnalysisPayload> {
     let mut stream = UnixStream::connect(socket)?;
     let req = serde_json::to_vec(&Request::Analyze {
         text: text.to_string(),
+        read_only,
     })?;
     write_frame(&mut stream, &req)?;
     let resp = read_frame(&mut stream)?;
@@ -199,8 +206,14 @@ fn handle_connection(
 ) -> io::Result<()> {
     let req: Request = serde_json::from_slice(&read_frame(&mut stream)?)?;
     match req {
-        Request::Analyze { text } => {
-            let payload = engine.lock().unwrap().analyze(&text).unwrap_or_else(|e| {
+        Request::Analyze { text, read_only } => {
+            let engine = engine.lock().unwrap();
+            let result = if read_only {
+                engine.expand_only(&text)
+            } else {
+                engine.analyze(&text)
+            };
+            let payload = result.unwrap_or_else(|e| {
                 log::warn!("analysis failed: {e}");
                 AnalysisPayload::empty(text)
             });
@@ -269,6 +282,6 @@ mod tests {
     fn follower_without_a_server_errors() {
         let sock = std::env::temp_dir().join(format!("ae-noserv-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
-        assert!(run_follower(&sock, "KPI").is_err());
+        assert!(run_follower(&sock, "KPI", false).is_err());
     }
 }

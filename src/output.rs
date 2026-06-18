@@ -46,6 +46,96 @@ fn render_human(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Res
     Ok(())
 }
 
+/// One analyzed line of a batch run: its number, original text, and findings.
+pub struct LineResult {
+    pub line: usize,
+    pub text: String,
+    pub payload: AnalysisPayload,
+}
+
+/// A single position-tagged finding in batch output.
+#[derive(serde::Serialize)]
+struct Hit {
+    kind: &'static str,
+    line: usize,
+    col: usize,
+    acronym: String,
+    expansion: String,
+    confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern_type: Option<String>,
+}
+
+/// Render aggregated batch findings as `line:col`-tagged hits.
+pub fn render_lines(
+    out: &mut impl Write,
+    results: &[LineResult],
+    format: Format,
+) -> std::io::Result<()> {
+    let hits = build_hits(results);
+    match format {
+        Format::Human => {
+            if hits.is_empty() {
+                return writeln!(out, "No acronyms found.");
+            }
+            for h in &hits {
+                writeln!(
+                    out,
+                    "{}:{}: {:<8} {:<40} {} {:.2}",
+                    h.line, h.col, h.acronym, h.expansion, h.kind, h.confidence
+                )?;
+            }
+        }
+        Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(&hits).unwrap())?,
+        Format::Ndjson => {
+            for h in &hits {
+                writeln!(out, "{}", serde_json::to_string(h).unwrap())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_hits(results: &[LineResult]) -> Vec<Hit> {
+    let mut hits = Vec::new();
+    for r in results {
+        for e in &r.payload.expansions {
+            let col = col_of(&r.text, &e.text_slice);
+            for m in &e.matches {
+                hits.push(Hit {
+                    kind: "expansion",
+                    line: r.line,
+                    col,
+                    acronym: e.acronym.clone(),
+                    expansion: m.expansion.clone(),
+                    confidence: m.confidence,
+                    pattern_type: None,
+                });
+            }
+        }
+        for c in &r.payload.learned_candidates {
+            hits.push(Hit {
+                kind: "learned",
+                line: r.line,
+                col: col_of(&r.text, &c.acronym),
+                acronym: c.acronym.clone(),
+                expansion: c.extracted_definition.clone(),
+                confidence: c.confidence,
+                pattern_type: Some(c.pattern_type.clone()),
+            });
+        }
+    }
+    hits
+}
+
+/// 1-indexed character column where `needle` first appears in `line`.
+fn col_of(line: &str, needle: &str) -> usize {
+    match line.find(needle) {
+        Some(byte) => line[..byte].chars().count() + 1,
+        None => 1,
+    }
+}
+
 fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Result<()> {
     for r in &payload.expansions {
         for m in &r.matches {

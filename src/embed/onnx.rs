@@ -180,8 +180,9 @@ fn resolve(spec: &str) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-/// Directories searched for a named model: `$AE_MODELS_DIR`, the user cache,
-/// and a dir alongside the executable (Homebrew installs models there).
+/// Directories searched for a named model, in order: `$AE_MODELS_DIR`, the user
+/// cache, a dir alongside the executable, and Homebrew's share dir — so a model
+/// installed by `brew install ae` is reachable by name even from a dev build.
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(d) = std::env::var_os("AE_MODELS_DIR") {
@@ -197,6 +198,11 @@ fn search_dirs() -> Vec<PathBuf> {
     {
         dirs.push(dir.join("../share/ae/models"));
     }
+    if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX") {
+        dirs.push(PathBuf::from(prefix).join("share/ae/models"));
+    }
+    dirs.push(PathBuf::from("/opt/homebrew/share/ae/models"));
+    dirs.push(PathBuf::from("/usr/local/share/ae/models"));
     dirs
 }
 

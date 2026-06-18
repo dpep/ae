@@ -7,7 +7,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser};
 
 use crate::engine::Engine;
 use crate::{ipc, output};
@@ -26,9 +26,26 @@ pub struct Cli {
     #[arg(long)]
     pub stop: bool,
 
-    /// Output format.
-    #[arg(short, long, value_enum, default_value_t = Format::Human)]
-    pub format: Format,
+    /// JSON output: a pretty object (analysis) or `{"status": …}` (commands).
+    #[arg(short = 'j', long, conflicts_with = "ndjson")]
+    pub json: bool,
+
+    /// NDJSON output: one compact object per finding/line.
+    #[arg(short = 'J', long)]
+    pub ndjson: bool,
+
+    /// Expand known acronyms only — don't extract or learn new ones (no writes).
+    #[arg(short, long)]
+    pub read_only: bool,
+
+    /// Batch mode: analyze input line by line (e.g. `cat file | ae -b`) and
+    /// aggregate the findings, each tagged with its `line:col` position.
+    #[arg(short, long)]
+    pub batch: bool,
+
+    /// Read input from this file, analyzed line by line (implies `--batch`).
+    #[arg(short, long)]
+    pub file: Option<PathBuf>,
 
     /// Unix domain socket path.
     #[arg(long, default_value = "/tmp/ae.sock")]
@@ -48,7 +65,21 @@ pub struct Cli {
     pub serve: bool,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+impl Cli {
+    /// The effective output format. Default is human; `-J/--ndjson` wins over
+    /// `-j/--json`.
+    pub fn format(&self) -> Format {
+        if self.ndjson {
+            Format::Ndjson
+        } else if self.json {
+            Format::Json
+        } else {
+            Format::Human
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Human,
     Json,
@@ -59,6 +90,7 @@ pub enum Format {
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     init_logging(cli.verbose);
+    let fmt = cli.format();
 
     // Internal Leader process: serve until stopped, then exit.
     if cli.serve {
@@ -73,38 +105,40 @@ pub fn run() -> ExitCode {
 
     if cli.stop {
         return match ipc::stop(&cli.socket) {
-            Ok(true) => {
-                println!("ae: daemon stopped");
-                ExitCode::SUCCESS
-            }
-            Ok(false) => {
-                eprintln!("ae: no daemon running");
-                ExitCode::SUCCESS
-            }
-            Err(e) => fail(&format!("stop failed: {e}")),
+            Ok(true) => status(fmt, "stopped", "daemon stopped"),
+            Ok(false) => status(fmt, "not_running", "no daemon running"),
+            Err(e) => fail(fmt, &format!("stop failed: {e}")),
         };
     }
 
     if cli.daemon {
         return match ipc::start_daemon(&cli.socket, cli.model.as_deref()) {
-            Ok(ipc::DaemonOutcome::Started) => {
-                println!("ae: daemon started on {}", cli.socket.display());
-                ExitCode::SUCCESS
-            }
+            Ok(ipc::DaemonOutcome::Started) => status(fmt, "started", "daemon started"),
             Ok(ipc::DaemonOutcome::AlreadyRunning) => {
-                println!("ae: daemon already running");
-                ExitCode::SUCCESS
+                status(fmt, "already_running", "daemon already running")
             }
-            Err(e) => fail(&format!("could not start daemon: {e}")),
+            Err(e) => fail(fmt, &format!("could not start daemon: {e}")),
         };
+    }
+
+    // A file or explicit batch flag runs the aggregated line-by-line path.
+    if cli.batch || cli.file.is_some() {
+        return run_batch(&cli, fmt);
+    }
+
+    // Bare invocation with nothing to analyze: show help instead of an error.
+    if cli.text.is_none() && io::stdin().is_terminal() {
+        let _ = Cli::command().print_help();
+        println!();
+        return ExitCode::SUCCESS;
     }
 
     let text = match determine_input(&cli) {
         Ok(t) => t,
-        Err(e) => return fail(&e),
+        Err(e) => return fail(fmt, &e),
     };
 
-    let payload = match ipc::run_follower(&cli.socket, &text) {
+    let payload = match ipc::run_follower(&cli.socket, &text, cli.read_only) {
         Ok(p) => {
             log::debug!("served by daemon");
             p
@@ -113,22 +147,93 @@ pub fn run() -> ExitCode {
             log::debug!("no daemon; evaluating in-process");
             match evaluate_in_process(&cli, &text) {
                 Ok(p) => p,
-                Err(e) => return fail(&format!("evaluation failed: {e}")),
+                Err(e) => return fail(fmt, &format!("evaluation failed: {e}")),
             }
         }
     };
 
     let stdout = io::stdout();
-    if let Err(e) = output::render(&mut stdout.lock(), &payload, cli.format) {
-        return fail(&format!("render failed: {e}"));
+    if let Err(e) = output::render(&mut stdout.lock(), &payload, fmt) {
+        return fail(fmt, &format!("render failed: {e}"));
     }
     ExitCode::SUCCESS
 }
 
 /// The self-healing fallback: open the shared persistent engine and evaluate.
+/// Honors `--read-only` (expand without learning).
 fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::AnalysisPayload> {
     let engine = Engine::open(&ipc::db_path(&cli.socket), cli.model.as_deref())?;
-    engine.analyze(text)
+    if cli.read_only {
+        engine.expand_only(text)
+    } else {
+        engine.analyze(text)
+    }
+}
+
+/// Batch mode: analyze each input line with one warm in-process engine and emit
+/// aggregated, position-tagged hits. Runs in-process (not via the daemon) since
+/// it's one bulk pass over many lines.
+fn run_batch(cli: &Cli, fmt: Format) -> ExitCode {
+    let raw = match &cli.file {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return fail(fmt, &format!("could not read {}: {e}", path.display())),
+        },
+        None => match read_raw_input(cli) {
+            Ok(r) => r,
+            Err(e) => return fail(fmt, &e),
+        },
+    };
+    let engine = match Engine::open(&ipc::db_path(&cli.socket), cli.model.as_deref()) {
+        Ok(e) => e,
+        Err(e) => return fail(fmt, &format!("could not open engine: {e}")),
+    };
+
+    let mut results = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let payload = if cli.read_only {
+            engine.expand_only(line)
+        } else {
+            engine.analyze(line)
+        };
+        match payload {
+            Ok(p) if !p.is_empty() => results.push(output::LineResult {
+                line: i + 1,
+                text: line.to_string(),
+                payload: p,
+            }),
+            Ok(_) => {}
+            Err(e) => return fail(fmt, &format!("evaluation failed: {e}")),
+        }
+    }
+
+    let stdout = io::stdout();
+    if let Err(e) = output::render_lines(&mut stdout.lock(), &results, fmt) {
+        return fail(fmt, &format!("render failed: {e}"));
+    }
+    ExitCode::SUCCESS
+}
+
+/// Like [`determine_input`] but preserves the full multi-line content (no trim)
+/// so batch mode can split it into lines.
+fn read_raw_input(cli: &Cli) -> Result<String, String> {
+    if !io::stdin().is_terminal() {
+        let mut buffer = String::new();
+        io::stdin()
+            .read_to_string(&mut buffer)
+            .map_err(|e| format!("could not read stdin: {e}"))?;
+        if buffer.trim().is_empty() {
+            return Err("no input on stdin".into());
+        }
+        Ok(buffer)
+    } else if let Some(text) = &cli.text {
+        Ok(text.clone())
+    } else {
+        Err("no input: pipe text via stdin or pass it as an argument".into())
+    }
 }
 
 /// Resolve the text to analyze: piped stdin wins; otherwise the positional
@@ -159,7 +264,23 @@ fn init_logging(verbose: bool) {
         .try_init();
 }
 
-fn fail(msg: &str) -> ExitCode {
-    eprintln!("ae: {msg}");
+/// Emit a command result (not analysis data) to stdout, honoring the format so
+/// every subcommand is script-friendly. Human is a one-liner; json/ndjson is a
+/// `{"status": ...}` object.
+fn status(fmt: Format, code: &str, human: &str) -> ExitCode {
+    match fmt {
+        Format::Human => println!("ae: {human}"),
+        Format::Json => println!("{}", serde_json::json!({ "status": code })),
+        Format::Ndjson => println!("{}", serde_json::json!({ "status": code })),
+    }
+    ExitCode::SUCCESS
+}
+
+/// Report an error on stderr, as JSON when a machine format is in effect.
+fn fail(fmt: Format, msg: &str) -> ExitCode {
+    match fmt {
+        Format::Human => eprintln!("ae: {msg}"),
+        _ => eprintln!("{}", serde_json::json!({ "error": msg })),
+    }
     ExitCode::FAILURE
 }

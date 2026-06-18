@@ -48,7 +48,11 @@ deterministic hash embedder.
 ae [TEXT] [OPTIONS]
 
   TEXT                 text to scan; optional when piping via stdin
-  -f, --format <FMT>   human | json | ndjson        [default: human]
+  -j, --json           JSON output (pretty object)
+  -J, --ndjson         NDJSON output (one object per line)
+  -b, --batch          analyze input line by line, aggregated with line:col
+  -f, --file <PATH>    read input from a file (implies --batch)
+  -r, --read-only      expand only — never extract or persist new acronyms
   -m, --model <SPEC>   embedding model: a path (dir or .onnx) or a name
   -d, --daemon         start a detached background leader
       --stop           stop the running background leader
@@ -56,8 +60,17 @@ ae [TEXT] [OPTIONS]
   -v, --verbose        engine telemetry to stderr
 ```
 
-stdin (when piped) wins; otherwise the positional `TEXT` is used. stdout carries
-only data — all logs go to stderr, so `ae … | jq` is always safe.
+Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. stdin (when
+piped) wins; otherwise the positional `TEXT` is used; with nothing to do, `ae`
+prints help. stdout carries only data — all logs go to stderr, so `ae … | jq` is
+always safe. Every command is machine-friendly: `-j`/`-J` work everywhere, and
+`--daemon`/`--stop` emit a `{"status": …}` object in those modes.
+
+`--batch` (or `--file`/`cat file | ae -b`) scans input line by line and
+aggregates the findings, each tagged with its `line:col` position — grep-style in
+human mode, a flat array of hits in `-j`/`-J`. `--read-only` is the safe path for
+untrusted or high-volume input — it expands known acronyms without ever writing
+to the dictionary.
 
 `--model` lets you point at any compatible model — an absolute/relative path to a
 model directory or `.onnx` file, or a bare name resolved against the model search

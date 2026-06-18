@@ -15,12 +15,23 @@ why anything deviates from the spec.
   is feature-gated, never on the default path.
 - **Single binary, three roles.** The same binary is CLI, Leader daemon, and
   Follower proxy. A file lock picks the role; nothing else coordinates them.
-- **Every command is agent/script-friendly.** Output honors
-  `--format {human,json,ndjson}`. Keep field names stable across the payload
-  types in `src/types.rs`.
+- **Every command is agent/script-friendly.** *All* output — analysis *and*
+  command status (`--daemon`, `--stop`, errors) — honors the format. Default is
+  human; `-j/--json` and `-J/--ndjson` select JSON/NDJSON. Resolve the effective
+  format once via `Cli::format()`; render analysis through `output::render`
+  (or `output::render_lines` for batch) and command results through
+  `status`/`fail`. `json` is a pretty object, `ndjson` is one compact object per
+  line. When you add a command or a payload field, give it structured output in
+  the same change and keep field names stable across `src/types.rs`.
+- **Read-only is a first-class mode.** `--read-only` (`-r`) expands without
+  extracting or persisting — `Engine::expand_only`, no DB writes. Anything that
+  mutates the dictionary must be gated by it.
+- **Batch is line-oriented.** `--batch` / `--file` analyze input line by line and
+  emit aggregated, `line:col`-tagged hits (`output::render_lines`). A bare
+  invocation with no input prints `--help`, not an error.
 - **Deterministic where it can be.** Parsing, the trie, MRL compression, and the
-  default embedder are all deterministic and unit-tested. Don't make the default
-  path depend on an external model or the network.
+  hash fallback embedder are all deterministic and unit-tested. Keep the
+  default path working offline — the real model is optional, never required.
 
 ## Language and toolchain
 

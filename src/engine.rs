@@ -69,6 +69,19 @@ impl Engine {
         })
     }
 
+    /// Read-only Stage 1 only: expand known acronyms without extracting or
+    /// persisting anything. The dictionary is never written, so this is safe to
+    /// run against a shared DB without side effects.
+    pub fn expand_only(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
+        let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
+        let expansions = self.expand(text, &query_vec)?;
+        Ok(AnalysisPayload {
+            sentence: text.to_string(),
+            expansions,
+            learned_candidates: Vec::new(),
+        })
+    }
+
     /// Stage 1 — scan the text for known acronyms and rank their expansions.
     fn expand(&self, text: &str, query_vec: &[f32]) -> rusqlite::Result<Vec<ExpansionResult>> {
         let mut results: Vec<ExpansionResult> = Vec::new();
@@ -215,6 +228,18 @@ mod tests {
         let e = Engine::in_memory().unwrap();
         let out = e.analyze("nothing notable here").unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn read_only_expands_but_learns_nothing() {
+        let e = Engine::in_memory().unwrap();
+        let out = e.expand_only("The ZQ (Zebra Queue) and the OKR.").unwrap();
+        // Seeded OKR still expands; the inline ZQ definition is ignored.
+        assert!(out.expansions.iter().any(|r| r.acronym == "OKR"));
+        assert!(out.learned_candidates.is_empty());
+        // Nothing was persisted: a later pass still doesn't know ZQ.
+        let again = e.expand_only("Drain the ZQ now.").unwrap();
+        assert!(!again.expansions.iter().any(|r| r.acronym == "ZQ"));
     }
 
     #[test]

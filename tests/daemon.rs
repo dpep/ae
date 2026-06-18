@@ -49,7 +49,7 @@ fn query(socket: &Path, text: &str) -> String {
     let mut child = Command::new(bin())
         .arg("--socket")
         .arg(socket)
-        .args(["--format", "json"])
+        .args(["-j"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -117,7 +117,7 @@ fn stop_without_a_daemon_is_harmless() {
     let sock = scratch_socket("nostop");
     let (ok, msg) = run(&sock, &["--stop"], "30");
     assert!(ok, "stop should succeed even with no daemon");
-    assert!(msg.is_empty()); // the "no daemon" notice goes to stderr
+    assert!(msg.contains("no daemon")); // reported as a status result
     cleanup(&sock);
 }
 
