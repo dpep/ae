@@ -105,7 +105,7 @@ pub fn run() -> ExitCode {
             p
         }
         Err(_) => {
-            log::warn!("no daemon; evaluating in-process");
+            log::debug!("no daemon; evaluating in-process");
             match evaluate_in_process(&cli, &text) {
                 Ok(p) => p,
                 Err(e) => return fail(&format!("evaluation failed: {e}")),
