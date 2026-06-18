@@ -147,6 +147,33 @@ commit.
 - [x] `--min-confidence` (default 0.15) on `suggest`; `ae prune` drops below it
       and removes seen-once noise candidates
 
+## CLI consolidation
+
+- [x] `list [FILTER]` folds in `search` (substring of acronym or expansion)
+- [x] `add <ACR> <EXP>...` takes multiple expansions; `define` is the
+      interactive promote (pick from suggestions) — overlap removed
+- [x] `-q/--quiet` (global) suppresses normal stdout (analysis + commands)
+- [x] `suggest` — higher default floor (0.30 vs prune's 0.15), `--min-confidence`
+      override, `-l/--limit N` per acronym; `define` shows *all* (diagnostic)
+
+## Proposed: one confidence-scored model (needs buy-in before migrating)
+
+Today "known" (dictionary) and "potential" (speculative) expansions are separate
+tables. They're really the same thing at different confidence. Proposed unified
+model — an `(acronym, expansion)` with:
+
+- `verified: bool` — a human asserted it (`add`/`define`). Huge signal that the
+  expansion is *valid*, though not that it's *the* one for a given mention.
+- a **validity** score — P(expansion is a real expansion of the acronym): 1.0
+  when verified, else the mined confidence (recurrence + coherence).
+- decomposed scores worth modeling separately:
+  1. **is-acronym** — P(token is an acronym) (today: shape + candidate freq)
+  2. **expansion-validity** — P(expansion valid for acronym) (verified vs mined)
+  3. **contextual-likelihood** — P(expansion | acronym, sentence) (today: the
+     cosine-context term in expansion ranking)
+
+Migration touches the dictionary/trie/expand path, so it's gated on sign-off.
+
 ### Speculation — next steps
 
 - [ ] dedup across differing word counts / via embedding similarity (prefix only

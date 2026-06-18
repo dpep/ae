@@ -75,15 +75,18 @@ Subcommands curate the dictionary directly (no flags needed — they're distinct
 from analysis input, which arrives as a quoted argument or via stdin):
 
 ```sh
-ae add MVP "Minimum Viable Product"   # add an entry
+ae add MVP "Minimum Viable Product" "Most Valuable Player"   # add (one or more)
 ae list                               # list everything
-ae search perf                        # substring search over acronyms + expansions
+ae list perf                          # filter by substring of acronym or expansion
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
-ae suggest MVP                        # speculative expansions mined from text
-ae define MVP "Minimum Viable Product" "Most Valuable Player"   # promote (multi)
+ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
+ae define MVP                         # promote interactively (fzf), or pass expansions
 ae prune                              # GC: dedup + drop low-confidence/noise
 ```
+
+`-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
+learns; `ae add … -q` adds without printing).
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An
@@ -91,8 +94,9 @@ acronym can hold several expansions, so multi-select is first-class.
 
 `ae prune` is the occasional GC: it merges prefix-duplicate expansions
 ("min viable product" → "minimum viable product"), drops ones below a confidence
-floor (default 0.15, `--min-confidence` to override — same flag on `suggest`),
-and removes seen-once noise candidates.
+floor (default 0.15), and removes seen-once noise candidates. `ae suggest` keeps
+a higher bar by default (0.30) since speculation is noisy; both take
+`--min-confidence` to override, and `suggest` takes `-l/--limit N`.
 
 `ae suggest` is the payoff of tracking candidates. When `ae` analyzes text it
 mines word-sequences whose initials spell a watched candidate acronym — no
@@ -103,15 +107,16 @@ each phrase recurs and how well its context fits where the acronym is used, then
 blends both into a confidence:
 
 ```
-$ ae suggest MVP
+$ ae suggest MVP --min-confidence 0
 MVP   minimum viable product    0.50 (2)
 MVP   min viable product        0.25 (1)
 MVP   most valuable player      0.25 (1)
 ```
 
-Confirm one with `ae add MVP "Minimum Viable Product"` (which clears it from the
-candidate/suggestion lists). It's heuristic — short acronyms attract noise, which
-sinks to the bottom on low confidence.
+Confirm one with `ae define MVP` (interactive) or `ae add MVP "Minimum Viable
+Product"` (which clears it from the candidate/suggestion lists). It's heuristic —
+short acronyms attract noise, which sinks to the bottom on low confidence and is
+hidden by the default threshold.
 
 Removal disambiguates when an acronym has several expansions:
 

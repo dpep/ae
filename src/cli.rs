@@ -69,6 +69,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
+    /// Suppress normal stdout output (still does the work — e.g. silently learn).
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+
     /// Internal: run as the Leader server process (spawned by `--daemon`).
     #[arg(long = "__serve", hide = true)]
     pub serve: bool,
@@ -105,23 +109,29 @@ pub enum Format {
 /// dictionary directly (no model needed).
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// List every acronym and expansion.
-    List,
+    /// List acronyms and expansions, optionally filtered by a substring of
+    /// either (`ae list perf`). An alias for the former `search`.
+    List { filter: Option<String> },
     /// Show the expansions of one acronym.
     Show { acronym: String },
-    /// Search acronyms and expansions by substring.
-    Search { query: String },
-    /// Add an acronym/expansion to the dictionary.
-    Add { acronym: String, expansion: String },
+    /// Add an acronym with one or more expansions to the dictionary.
+    Add {
+        acronym: String,
+        #[arg(required = true)]
+        expansions: Vec<String>,
+    },
     /// List candidate acronyms (seen but undefined) by frequency.
     Candidates,
     /// Suggest speculative expansions mined from text, with confidence.
     /// Optionally for one acronym.
     Suggest {
         acronym: Option<String>,
-        /// Hide suggestions below this confidence (default 0.15).
+        /// Hide suggestions below this confidence (default 0.30).
         #[arg(long)]
         min_confidence: Option<f32>,
+        /// Keep at most this many suggestions per acronym.
+        #[arg(short, long)]
+        limit: Option<usize>,
     },
     /// Promote a candidate to the dictionary: add the given expansions, or pick
     /// from the mined suggestions interactively (fzf if available).
@@ -173,17 +183,17 @@ pub fn run() -> ExitCode {
 
     if cli.stop {
         return match ipc::stop(&cli.socket) {
-            Ok(true) => status(fmt, "stopped", "daemon stopped"),
-            Ok(false) => status(fmt, "not_running", "no daemon running"),
+            Ok(true) => status(fmt, cli.quiet, "stopped", "daemon stopped"),
+            Ok(false) => status(fmt, cli.quiet, "not_running", "no daemon running"),
             Err(e) => fail(fmt, &format!("stop failed: {e}")),
         };
     }
 
     if cli.daemon {
         return match ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref()) {
-            Ok(ipc::DaemonOutcome::Started) => status(fmt, "started", "daemon started"),
+            Ok(ipc::DaemonOutcome::Started) => status(fmt, cli.quiet, "started", "daemon started"),
             Ok(ipc::DaemonOutcome::AlreadyRunning) => {
-                status(fmt, "already_running", "daemon already running")
+                status(fmt, cli.quiet, "already_running", "daemon already running")
             }
             Err(e) => fail(fmt, &format!("could not start daemon: {e}")),
         };
@@ -220,9 +230,11 @@ pub fn run() -> ExitCode {
         }
     };
 
-    let stdout = io::stdout();
-    if let Err(e) = output::render(&mut stdout.lock(), &payload, fmt) {
-        return fail(fmt, &format!("render failed: {e}"));
+    if !cli.quiet {
+        let stdout = io::stdout();
+        if let Err(e) = output::render(&mut stdout.lock(), &payload, fmt) {
+            return fail(fmt, &format!("render failed: {e}"));
+        }
     }
     ExitCode::SUCCESS
 }
@@ -278,9 +290,11 @@ fn run_batch(cli: &Cli, fmt: Format) -> ExitCode {
         }
     }
 
-    let stdout = io::stdout();
-    if let Err(e) = output::render_lines(&mut stdout.lock(), &results, fmt) {
-        return fail(fmt, &format!("render failed: {e}"));
+    if !cli.quiet {
+        let stdout = io::stdout();
+        if let Err(e) = output::render_lines(&mut stdout.lock(), &results, fmt) {
+            return fail(fmt, &format!("render failed: {e}"));
+        }
     }
     ExitCode::SUCCESS
 }
@@ -334,9 +348,23 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
         Err(e) => return fail(fmt, &format!("could not open dictionary: {e}")),
     };
 
+    let quiet = cli.quiet;
     match command {
-        Command::List => emit_entries(fmt, store.all_entries()),
-        Command::Search { query } => emit_entries(fmt, store.search(query)),
+        // Read-only commands produce only output, so `--quiet` is a no-op exit.
+        Command::List { filter } if quiet => {
+            let _ = filter;
+            ExitCode::SUCCESS
+        }
+        Command::List { filter } => {
+            let entries = match filter {
+                Some(f) => store.search(f),
+                None => store.all_entries(),
+            };
+            emit_entries(fmt, entries)
+        }
+        Command::Show { .. } | Command::Candidates | Command::Suggest { .. } if quiet => {
+            ExitCode::SUCCESS
+        }
         Command::Show { acronym } => {
             let entries = store.expansions_for(acronym).map(|rows| {
                 rows.into_iter()
@@ -345,20 +373,6 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             });
             emit_entries(fmt, entries)
         }
-        Command::Add { acronym, expansion } => match store.add_entry(acronym, expansion) {
-            Ok(_) => {
-                let acronym = acronym.to_uppercase();
-                match fmt {
-                    Format::Human => println!("ae: added {acronym} → {expansion}"),
-                    _ => println!(
-                        "{}",
-                        serde_json::json!({"status": "added", "acronym": acronym, "expansion": expansion})
-                    ),
-                }
-                ExitCode::SUCCESS
-            }
-            Err(e) => fail(fmt, &format!("add failed: {e}")),
-        },
         Command::Candidates => match store.candidates() {
             Ok(candidates) => {
                 let stdout = io::stdout();
@@ -372,30 +386,70 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
         Command::Suggest {
             acronym,
             min_confidence,
+            limit,
         } => run_suggest(
             &store,
             fmt,
             acronym.as_deref(),
-            min_confidence.unwrap_or(MIN_CONFIDENCE),
+            min_confidence.unwrap_or(SUGGEST_MIN_CONFIDENCE),
+            *limit,
         ),
+        Command::Add {
+            acronym,
+            expansions,
+        } => run_add(&store, fmt, quiet, acronym, expansions),
         Command::Define {
             acronym,
             expansions,
-        } => run_define(&store, fmt, acronym, expansions),
-        Command::Prune { min_confidence } => {
-            run_prune(&store, fmt, min_confidence.unwrap_or(MIN_CONFIDENCE))
-        }
+        } => run_define(&store, fmt, quiet, acronym, expansions),
+        Command::Prune { min_confidence } => run_prune(
+            &store,
+            fmt,
+            quiet,
+            min_confidence.unwrap_or(PRUNE_MIN_CONFIDENCE),
+        ),
         Command::Rm {
             acronym,
             expansion,
             all,
-        } => run_rm(&store, fmt, acronym, expansion.as_deref(), *all),
+        } => run_rm(&store, fmt, quiet, acronym, expansion.as_deref(), *all),
     }
 }
 
-/// Default confidence floor below which speculative suggestions are hidden and
-/// pruning discards them.
-const MIN_CONFIDENCE: f32 = 0.15;
+/// Add one acronym with one or more expansions.
+fn run_add(
+    store: &crate::store::Store,
+    fmt: Format,
+    quiet: bool,
+    acronym: &str,
+    expansions: &[String],
+) -> ExitCode {
+    for expansion in expansions {
+        if let Err(e) = store.add_entry(acronym, expansion) {
+            return fail(fmt, &format!("add failed: {e}"));
+        }
+    }
+    let acronym = acronym.to_uppercase();
+    if !quiet {
+        match fmt {
+            Format::Human => {
+                for expansion in expansions {
+                    println!("ae: added {acronym} → {expansion}");
+                }
+            }
+            _ => println!(
+                "{}",
+                serde_json::json!({"status": "added", "acronym": acronym, "added": expansions})
+            ),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// `suggest` hides anything below this (keep the bar high — speculation is
+/// noisy). `prune` is gentler, only discarding genuine low-signal rows.
+const SUGGEST_MIN_CONFIDENCE: f32 = 0.30;
+const PRUNE_MIN_CONFIDENCE: f32 = 0.15;
 
 /// Score speculative expansions: `(acronym, expansion, count, confidence)`,
 /// for one acronym or all. Shared by `suggest`, `define`, and `prune`.
@@ -424,12 +478,14 @@ fn score_potentials(
         .collect())
 }
 
-/// Render speculative expansions at or above `min` confidence, best first.
+/// Render speculative expansions at or above `min` confidence, best first, at
+/// most `limit` per acronym.
 fn run_suggest(
     store: &crate::store::Store,
     fmt: Format,
     acronym: Option<&str>,
     min: f32,
+    limit: Option<usize>,
 ) -> ExitCode {
     let mut scored = match score_potentials(store, acronym) {
         Ok(s) => s,
@@ -437,6 +493,15 @@ fn run_suggest(
     };
     scored.retain(|(_, _, _, conf)| *conf >= min);
     scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.3.total_cmp(&a.3)));
+
+    if let Some(limit) = limit {
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        scored.retain(|(acr, _, _, _)| {
+            let n = seen.entry(acr.clone()).or_insert(0);
+            *n += 1;
+            *n <= limit
+        });
+    }
 
     let stdout = io::stdout();
     if let Err(e) = output::render_suggestions(&mut stdout.lock(), &scored, fmt) {
@@ -458,7 +523,7 @@ fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
 
 /// GC speculation: dedup prefix-duplicate expansions, drop low-confidence ones,
 /// and remove seen-once noise candidates.
-fn run_prune(store: &crate::store::Store, fmt: Format, min: f32) -> ExitCode {
+fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) -> ExitCode {
     let result = (|| -> rusqlite::Result<(usize, usize, usize)> {
         let mut merged = 0;
         for acronym in store.distinct_potential_acronyms()? {
@@ -476,14 +541,16 @@ fn run_prune(store: &crate::store::Store, fmt: Format, min: f32) -> ExitCode {
 
     match result {
         Ok((merged, dropped, candidates)) => {
-            match fmt {
-                Format::Human => println!(
-                    "ae: pruned — merged {merged}, dropped {dropped} low-confidence, removed {candidates} noise candidates"
-                ),
-                _ => println!(
-                    "{}",
-                    serde_json::json!({"status": "pruned", "merged": merged, "dropped": dropped, "candidates_removed": candidates})
-                ),
+            if !quiet {
+                match fmt {
+                    Format::Human => println!(
+                        "ae: pruned — merged {merged}, dropped {dropped} low-confidence, removed {candidates} noise candidates"
+                    ),
+                    _ => println!(
+                        "{}",
+                        serde_json::json!({"status": "pruned", "merged": merged, "dropped": dropped, "candidates_removed": candidates})
+                    ),
+                }
             }
             ExitCode::SUCCESS
         }
@@ -492,17 +559,18 @@ fn run_prune(store: &crate::store::Store, fmt: Format, min: f32) -> ExitCode {
 }
 
 /// Promote a candidate: add the given expansions, or pick interactively from the
-/// mined suggestions (fzf if available, else a numbered prompt).
+/// mined suggestions (all of them — diagnostic — via fzf or a numbered prompt).
 fn run_define(
     store: &crate::store::Store,
     fmt: Format,
+    quiet: bool,
     acronym: &str,
     expansions: &[String],
 ) -> ExitCode {
     let chosen: Vec<String> = if !expansions.is_empty() {
         expansions.to_vec()
     } else {
-        let suggestions = match score_potentials(store, Some(acronym)) {
+        let mut suggestions = match score_potentials(store, Some(acronym)) {
             Ok(s) => s,
             Err(e) => return fail(fmt, &format!("dictionary error: {e}")),
         };
@@ -515,14 +583,15 @@ fn run_define(
                 ),
             );
         }
-        let mut ranked: Vec<(String, f32)> = suggestions
+        // Show *all* candidate expansions when choosing — they're diagnostic.
+        suggestions.sort_by(|a, b| b.3.total_cmp(&a.3));
+        let ranked: Vec<(String, f32)> = suggestions
             .into_iter()
             .map(|(_, exp, _, conf)| (exp, conf))
             .collect();
-        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         match pick_expansions(&acronym.to_uppercase(), &ranked) {
             Some(sel) if !sel.is_empty() => sel,
-            Some(_) => return status(fmt, "cancelled", "nothing selected"),
+            Some(_) => return status(fmt, quiet, "cancelled", "nothing selected"),
             None => return ExitCode::FAILURE,
         }
     };
@@ -533,16 +602,18 @@ fn run_define(
             return fail(fmt, &format!("add failed: {e}"));
         }
     }
-    match fmt {
-        Format::Human => {
-            for expansion in &chosen {
-                println!("ae: added {acronym_upper} → {expansion}");
+    if !quiet {
+        match fmt {
+            Format::Human => {
+                for expansion in &chosen {
+                    println!("ae: added {acronym_upper} → {expansion}");
+                }
             }
+            _ => println!(
+                "{}",
+                serde_json::json!({"status": "defined", "acronym": acronym_upper, "added": chosen})
+            ),
         }
-        _ => println!(
-            "{}",
-            serde_json::json!({"status": "defined", "acronym": acronym_upper, "added": chosen})
-        ),
     }
     ExitCode::SUCCESS
 }
@@ -620,6 +691,7 @@ fn pick_numbered(acronym: &str, suggestions: &[(String, f32)]) -> Option<Vec<Str
 fn run_rm(
     store: &crate::store::Store,
     fmt: Format,
+    quiet: bool,
     acronym: &str,
     pattern: Option<&str>,
     all: bool,
@@ -630,7 +702,7 @@ fn run_rm(
     };
     let acronym = acronym.to_uppercase();
     if variants.is_empty() {
-        return removed_status(fmt, &acronym, 0);
+        return removed_status(fmt, quiet, &acronym, 0);
     }
 
     let all_exps: Vec<String> = variants.iter().map(|(_, e)| e.clone()).collect();
@@ -675,19 +747,21 @@ fn run_rm(
             Err(e) => return fail(fmt, &format!("delete failed: {e}")),
         }
     }
-    removed_status(fmt, &acronym, removed)
+    removed_status(fmt, quiet, &acronym, removed)
 }
 
-fn removed_status(fmt: Format, acronym: &str, n: usize) -> ExitCode {
-    match fmt {
-        Format::Human => {
-            let noun = if n == 1 { "entry" } else { "entries" };
-            println!("ae: removed {n} {noun} for {acronym}");
+fn removed_status(fmt: Format, quiet: bool, acronym: &str, n: usize) -> ExitCode {
+    if !quiet {
+        match fmt {
+            Format::Human => {
+                let noun = if n == 1 { "entry" } else { "entries" };
+                println!("ae: removed {n} {noun} for {acronym}");
+            }
+            _ => println!(
+                "{}",
+                serde_json::json!({"status": "removed", "acronym": acronym, "removed": n})
+            ),
         }
-        _ => println!(
-            "{}",
-            serde_json::json!({"status": "removed", "acronym": acronym, "removed": n})
-        ),
     }
     ExitCode::SUCCESS
 }
@@ -743,11 +817,12 @@ fn init_logging(verbose: bool) {
 /// Emit a command result (not analysis data) to stdout, honoring the format so
 /// every subcommand is script-friendly. Human is a one-liner; json/ndjson is a
 /// `{"status": ...}` object.
-fn status(fmt: Format, code: &str, human: &str) -> ExitCode {
-    match fmt {
-        Format::Human => println!("ae: {human}"),
-        Format::Json => println!("{}", serde_json::json!({ "status": code })),
-        Format::Ndjson => println!("{}", serde_json::json!({ "status": code })),
+fn status(fmt: Format, quiet: bool, code: &str, human: &str) -> ExitCode {
+    if !quiet {
+        match fmt {
+            Format::Human => println!("ae: {human}"),
+            _ => println!("{}", serde_json::json!({ "status": code })),
+        }
     }
     ExitCode::SUCCESS
 }

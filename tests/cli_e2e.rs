@@ -264,7 +264,8 @@ fn manage_add_list_search_show_then_remove() {
             .any(|r| r["expansion"] == "Minimum Viable Product")
     );
 
-    let search = run(&sock, &["search", "viable", "-j"], None);
+    // `list <filter>` folds in the old `search`.
+    let search = run(&sock, &["list", "viable", "-j"], None);
     let found: serde_json::Value = serde_json::from_str(&search.stdout).unwrap();
     assert!(
         found
@@ -434,6 +435,70 @@ fn suggest_respects_min_confidence() {
     );
     let v: serde_json::Value = serde_json::from_str(&hidden.stdout).unwrap();
     assert!(v.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn add_accepts_multiple_expansions() {
+    let sock = scratch_socket("addmulti");
+    let out = run(
+        &sock,
+        &["add", "PT", "Physical Therapy", "Part Time", "-j"],
+        None,
+    );
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["added"].as_array().unwrap().len(), 2);
+    let show = run(&sock, &["show", "PT", "-j"], None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&show.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn quiet_suppresses_output_but_still_works() {
+    let sock = scratch_socket("quiet");
+    // Analysis with -q prints nothing.
+    let a = run(&sock, &["-q"], Some("Check the OKR board."));
+    assert!(a.success && a.stdout.is_empty(), "stdout: {}", a.stdout);
+    // A command with -q prints nothing but still mutates.
+    let add = run(&sock, &["add", "XY", "Example Co", "-q"], None);
+    assert!(add.success && add.stdout.is_empty());
+    let show = run(&sock, &["show", "XY", "-j"], None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&show.stdout)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn suggest_limit_caps_per_acronym() {
+    let sock = scratch_socket("limit");
+    run(&sock, &[], Some("the MVP is a minimum viable product"));
+    run(&sock, &[], Some("MVP, a most valuable player"));
+    let out = run(
+        &sock,
+        &[
+            "suggest",
+            "MVP",
+            "--min-confidence",
+            "0",
+            "--limit",
+            "1",
+            "-j",
+        ],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
 }
 
 #[test]
