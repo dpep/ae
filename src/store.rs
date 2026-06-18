@@ -217,6 +217,85 @@ impl Store {
         Ok(rows)
     }
 
+    /// Distinct acronyms that have any speculative expansions.
+    pub fn distinct_potential_acronyms(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT acronym FROM potential_expansions")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete one speculative expansion. Returns the number of rows removed.
+    pub fn delete_potential(&self, acronym: &str, expansion: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM potential_expansions WHERE acronym = ?1 AND expansion = ?2",
+            params![
+                acronym.trim().to_uppercase(),
+                expansion.trim().to_lowercase()
+            ],
+        )?;
+        Ok(n)
+    }
+
+    /// Merge prefix-compatible expansions of `acronym` into the most complete
+    /// form (e.g. "min viable product" → "minimum viable product"), summing
+    /// counts and coherence. Returns how many rows were merged away.
+    pub fn dedup_potentials(&self, acronym: &str) -> Result<usize> {
+        let acronym = acronym.trim().to_uppercase();
+        let mut rows = self.potentials_for(&acronym)?;
+        let original = rows.len();
+        // Longest first, so the canonical form of each cluster is the fullest.
+        rows.sort_by_key(|r| std::cmp::Reverse(r.0.chars().count()));
+
+        let mut clusters: Vec<(String, i64, f64)> = Vec::new();
+        for (expansion, count, coh) in rows {
+            match clusters
+                .iter_mut()
+                .find(|c| prefix_compatible(&c.0, &expansion))
+            {
+                Some(c) => {
+                    c.1 += count;
+                    c.2 += coh;
+                }
+                None => clusters.push((expansion, count, coh)),
+            }
+        }
+        if clusters.len() == original {
+            return Ok(0);
+        }
+        self.conn.execute(
+            "DELETE FROM potential_expansions WHERE acronym = ?1",
+            params![acronym],
+        )?;
+        for (expansion, count, coh) in &clusters {
+            self.conn.execute(
+                "INSERT INTO potential_expansions (acronym, expansion, count, coh_sum)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![acronym, expansion, count, coh],
+            )?;
+        }
+        Ok(original - clusters.len())
+    }
+
+    /// Drop noise candidates (seen once, with nothing mined) and any orphaned
+    /// context rows. Returns the number of candidates removed.
+    pub fn prune_noise_candidates(&self) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM candidate_acronyms
+             WHERE count <= 1 AND acronym NOT IN (SELECT acronym FROM potential_expansions)",
+            [],
+        )?;
+        self.conn.execute(
+            "DELETE FROM candidate_contexts
+             WHERE acronym NOT IN (SELECT acronym FROM candidate_acronyms)",
+            [],
+        )?;
+        Ok(n)
+    }
+
     /// The running-mean context embedding for a candidate acronym, if any.
     pub fn candidate_context_mean(&self, acronym: &str) -> Result<Option<Vec<f32>>> {
         let acronym = acronym.trim().to_uppercase();
@@ -389,6 +468,23 @@ impl Store {
     }
 }
 
+/// Two expansions are prefix-compatible if they have the same word count and
+/// each word pair is equal or one is a (≥3-char) prefix of the other — so
+/// "min viable product" ≈ "minimum viable product".
+fn prefix_compatible(a: &str, b: &str) -> bool {
+    let aw: Vec<&str> = a.split_whitespace().collect();
+    let bw: Vec<&str> = b.split_whitespace().collect();
+    aw.len() == bw.len() && aw.iter().zip(&bw).all(|(x, y)| word_compatible(x, y))
+}
+
+fn word_compatible(x: &str, y: &str) -> bool {
+    if x == y {
+        return true;
+    }
+    let (short, long) = if x.len() < y.len() { (x, y) } else { (y, x) };
+    short.len() >= 3 && long.starts_with(short)
+}
+
 /// Pack `f32`s into little-endian bytes.
 fn encode(v: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(v.len() * 4);
@@ -484,6 +580,44 @@ mod tests {
         // Defining it removes it from the candidate list.
         s.add_entry("MVP", "Minimum Viable Product").unwrap();
         assert_eq!(s.candidates().unwrap(), vec![("ABC".into(), 1)]);
+    }
+
+    #[test]
+    fn dedup_merges_prefix_compatible_expansions() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_potential("MVP", "min viable product", 1.0)
+            .unwrap();
+        s.record_potential("MVP", "minimum viable product", 1.0)
+            .unwrap();
+        s.record_potential("MVP", "most valuable player", 1.0)
+            .unwrap();
+
+        assert_eq!(s.dedup_potentials("MVP").unwrap(), 1); // two folded into one
+        let pots = s.potentials_for("MVP").unwrap();
+        assert_eq!(pots.len(), 2);
+        // Canonical is the fullest form, with counts summed.
+        assert!(
+            pots.iter()
+                .any(|(e, c, _)| e == "minimum viable product" && *c == 2)
+        );
+        assert!(pots.iter().any(|(e, _, _)| e == "most valuable player"));
+    }
+
+    #[test]
+    fn prune_drops_seen_once_candidates_with_nothing_mined() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_candidate("XX").unwrap(); // seen once, no potentials → noise
+        s.record_candidate("MVP").unwrap();
+        s.record_potential("MVP", "minimum viable product", 1.0)
+            .unwrap();
+        assert_eq!(s.prune_noise_candidates().unwrap(), 1);
+        let acrs: Vec<String> = s
+            .candidates()
+            .unwrap()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert!(acrs.contains(&"MVP".to_string()) && !acrs.contains(&"XX".to_string()));
     }
 
     #[test]

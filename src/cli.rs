@@ -117,7 +117,25 @@ pub enum Command {
     Candidates,
     /// Suggest speculative expansions mined from text, with confidence.
     /// Optionally for one acronym.
-    Suggest { acronym: Option<String> },
+    Suggest {
+        acronym: Option<String>,
+        /// Hide suggestions below this confidence (default 0.15).
+        #[arg(long)]
+        min_confidence: Option<f32>,
+    },
+    /// Promote a candidate to the dictionary: add the given expansions, or pick
+    /// from the mined suggestions interactively (fzf if available).
+    Define {
+        acronym: String,
+        expansions: Vec<String>,
+    },
+    /// Garbage-collect speculation: merge prefix-duplicate expansions, drop
+    /// low-confidence ones, and remove seen-once noise candidates.
+    Prune {
+        /// Drop expansions below this confidence (default 0.15).
+        #[arg(long)]
+        min_confidence: Option<f32>,
+    },
     /// Remove an acronym. Bare `rm ACR` removes it when there's one expansion;
     /// otherwise pass a substring to pick one, or `--all` to remove every one.
     #[command(visible_alias = "delete")]
@@ -351,7 +369,22 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             }
             Err(e) => fail(fmt, &format!("dictionary error: {e}")),
         },
-        Command::Suggest { acronym } => run_suggest(&store, fmt, acronym.as_deref()),
+        Command::Suggest {
+            acronym,
+            min_confidence,
+        } => run_suggest(
+            &store,
+            fmt,
+            acronym.as_deref(),
+            min_confidence.unwrap_or(MIN_CONFIDENCE),
+        ),
+        Command::Define {
+            acronym,
+            expansions,
+        } => run_define(&store, fmt, acronym, expansions),
+        Command::Prune { min_confidence } => {
+            run_prune(&store, fmt, min_confidence.unwrap_or(MIN_CONFIDENCE))
+        }
         Command::Rm {
             acronym,
             expansion,
@@ -360,38 +393,50 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
     }
 }
 
-/// Build and render speculative expansions, scoring confidence from both
-/// recurrence (stats) and context coherence (vectors).
-fn run_suggest(store: &crate::store::Store, fmt: Format, acronym: Option<&str>) -> ExitCode {
-    let raw: rusqlite::Result<Vec<(String, String, i64, f64)>> = match acronym {
-        Some(acr) => store.potentials_for(acr).map(|v| {
-            v.into_iter()
-                .map(|(exp, n, coh)| (acr.to_uppercase(), exp, n, coh))
-                .collect()
-        }),
-        None => store.all_potentials(),
+/// Default confidence floor below which speculative suggestions are hidden and
+/// pruning discards them.
+const MIN_CONFIDENCE: f32 = 0.15;
+
+/// Score speculative expansions: `(acronym, expansion, count, confidence)`,
+/// for one acronym or all. Shared by `suggest`, `define`, and `prune`.
+fn score_potentials(
+    store: &crate::store::Store,
+    acronym: Option<&str>,
+) -> rusqlite::Result<Vec<(String, String, i64, f32)>> {
+    let raw: Vec<(String, String, i64, f64)> = match acronym {
+        Some(acr) => store
+            .potentials_for(acr)?
+            .into_iter()
+            .map(|(exp, n, coh)| (acr.to_uppercase(), exp, n, coh))
+            .collect(),
+        None => store.all_potentials()?,
     };
-    let rows = match raw {
-        Ok(rows) => rows,
+    let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for (acr, _, n, _) in &raw {
+        *totals.entry(acr.clone()).or_insert(0) += n;
+    }
+    Ok(raw
+        .into_iter()
+        .map(|(acr, exp, n, coh)| {
+            let conf = confidence(n, coh, totals[&acr]);
+            (acr, exp, n, conf)
+        })
+        .collect())
+}
+
+/// Render speculative expansions at or above `min` confidence, best first.
+fn run_suggest(
+    store: &crate::store::Store,
+    fmt: Format,
+    acronym: Option<&str>,
+    min: f32,
+) -> ExitCode {
+    let mut scored = match score_potentials(store, acronym) {
+        Ok(s) => s,
         Err(e) => return fail(fmt, &format!("dictionary error: {e}")),
     };
-
-    // Per-acronym totals give each expansion's share of the sightings.
-    let mut totals: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
-    for (acr, _, n, _) in &rows {
-        *totals.entry(acr.as_str()).or_insert(0) += n;
-    }
-    let scored: Vec<(String, String, i64, f32)> = rows
-        .iter()
-        .map(|(acr, exp, n, coh_sum)| {
-            (
-                acr.clone(),
-                exp.clone(),
-                *n,
-                confidence(*n, *coh_sum, totals[acr.as_str()]),
-            )
-        })
-        .collect();
+    scored.retain(|(_, _, _, conf)| *conf >= min);
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.3.total_cmp(&a.3)));
 
     let stdout = io::stdout();
     if let Err(e) = output::render_suggestions(&mut stdout.lock(), &scored, fmt) {
@@ -409,6 +454,166 @@ fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
     let share = count / total.max(1) as f32;
     let mean_coh = (coh_sum as f32 / count).clamp(0.0, 1.0);
     ((0.5 * share + 0.5 * mean_coh) * (count / (count + 1.0))).clamp(0.0, 1.0)
+}
+
+/// GC speculation: dedup prefix-duplicate expansions, drop low-confidence ones,
+/// and remove seen-once noise candidates.
+fn run_prune(store: &crate::store::Store, fmt: Format, min: f32) -> ExitCode {
+    let result = (|| -> rusqlite::Result<(usize, usize, usize)> {
+        let mut merged = 0;
+        for acronym in store.distinct_potential_acronyms()? {
+            merged += store.dedup_potentials(&acronym)?;
+        }
+        let mut dropped = 0;
+        for (acronym, expansion, _, conf) in score_potentials(store, None)? {
+            if conf < min {
+                dropped += store.delete_potential(&acronym, &expansion)?;
+            }
+        }
+        let candidates = store.prune_noise_candidates()?;
+        Ok((merged, dropped, candidates))
+    })();
+
+    match result {
+        Ok((merged, dropped, candidates)) => {
+            match fmt {
+                Format::Human => println!(
+                    "ae: pruned — merged {merged}, dropped {dropped} low-confidence, removed {candidates} noise candidates"
+                ),
+                _ => println!(
+                    "{}",
+                    serde_json::json!({"status": "pruned", "merged": merged, "dropped": dropped, "candidates_removed": candidates})
+                ),
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(fmt, &format!("prune failed: {e}")),
+    }
+}
+
+/// Promote a candidate: add the given expansions, or pick interactively from the
+/// mined suggestions (fzf if available, else a numbered prompt).
+fn run_define(
+    store: &crate::store::Store,
+    fmt: Format,
+    acronym: &str,
+    expansions: &[String],
+) -> ExitCode {
+    let chosen: Vec<String> = if !expansions.is_empty() {
+        expansions.to_vec()
+    } else {
+        let suggestions = match score_potentials(store, Some(acronym)) {
+            Ok(s) => s,
+            Err(e) => return fail(fmt, &format!("dictionary error: {e}")),
+        };
+        if suggestions.is_empty() {
+            return fail(
+                fmt,
+                &format!(
+                    "no suggestions for {} — add one explicitly",
+                    acronym.to_uppercase()
+                ),
+            );
+        }
+        let mut ranked: Vec<(String, f32)> = suggestions
+            .into_iter()
+            .map(|(_, exp, _, conf)| (exp, conf))
+            .collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+        match pick_expansions(&acronym.to_uppercase(), &ranked) {
+            Some(sel) if !sel.is_empty() => sel,
+            Some(_) => return status(fmt, "cancelled", "nothing selected"),
+            None => return ExitCode::FAILURE,
+        }
+    };
+
+    let acronym_upper = acronym.to_uppercase();
+    for expansion in &chosen {
+        if let Err(e) = store.add_entry(acronym, expansion) {
+            return fail(fmt, &format!("add failed: {e}"));
+        }
+    }
+    match fmt {
+        Format::Human => {
+            for expansion in &chosen {
+                println!("ae: added {acronym_upper} → {expansion}");
+            }
+        }
+        _ => println!(
+            "{}",
+            serde_json::json!({"status": "defined", "acronym": acronym_upper, "added": chosen})
+        ),
+    }
+    ExitCode::SUCCESS
+}
+
+/// Let the user pick one or more expansions interactively. Requires a TTY;
+/// prefers `fzf` (with multi-select), falls back to a numbered prompt.
+fn pick_expansions(acronym: &str, suggestions: &[(String, f32)]) -> Option<Vec<String>> {
+    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+        eprintln!("ae: not a TTY — pass expansions explicitly: ae define {acronym} \"...\"");
+        return None;
+    }
+    match pick_with_fzf(acronym, suggestions) {
+        Some(sel) => Some(sel),
+        None => pick_numbered(acronym, suggestions),
+    }
+}
+
+/// Multi-select via `fzf`. `None` if fzf isn't available (caller falls back).
+fn pick_with_fzf(acronym: &str, suggestions: &[(String, f32)]) -> Option<Vec<String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("fzf")
+        .args(["--multi", "--with-nth=1", "--delimiter=\t"])
+        .arg(format!("--prompt={acronym}> "))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        for (expansion, conf) in suggestions {
+            let _ = writeln!(stdin, "{expansion}\t({conf:.2})");
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    // Non-zero exit means the user cancelled — selected nothing.
+    let selected = if out.status.success() {
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split('\t').next())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(selected)
+}
+
+/// Numbered-prompt fallback when `fzf` isn't installed.
+fn pick_numbered(acronym: &str, suggestions: &[(String, f32)]) -> Option<Vec<String>> {
+    use std::io::Write;
+    let mut err = io::stderr();
+    let _ = writeln!(err, "Suggestions for {acronym}:");
+    for (i, (expansion, conf)) in suggestions.iter().enumerate() {
+        let _ = writeln!(err, "  {}) {expansion}  ({conf:.2})", i + 1);
+    }
+    let _ = write!(err, "select (e.g. 1 3, blank to cancel): ");
+    let _ = err.flush();
+
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).ok()?;
+    let chosen = line
+        .split_whitespace()
+        .filter_map(|t| t.parse::<usize>().ok())
+        .filter_map(|n| suggestions.get(n.wrapping_sub(1)))
+        .map(|(expansion, _)| expansion.clone())
+        .collect();
+    Some(chosen)
 }
 
 /// Resolve and execute a removal, disambiguating among multiple expansions.

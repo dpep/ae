@@ -139,14 +139,23 @@ commit.
       of its context (`coh_sum`); `confidence` blends recurrence share with mean
       coherence, damped for sparse counts
 
+- [x] `ae define <ACR>` — add given expansions (multi), or pick interactively
+      from suggestions via `fzf` (`--multi`) / numbered-prompt fallback
+- [x] prefix-normalization dedup — `ae prune` merges prefix-compatible
+      expansions ("min" ≈ "minimum", ≥3-char guard) into the fullest form,
+      summing counts/coherence
+- [x] `--min-confidence` (default 0.15) on `suggest`; `ae prune` drops below it
+      and removes seen-once noise candidates
+
 ### Speculation — next steps
 
-- [ ] interactive `ae define <ACR>` — prompt with ranked suggestions, confirm → add
-- [ ] dedup near-identical expansions ("minimum viable product" ≈ "min viable
-      product") via normalization/embedding similarity
-- [ ] prune low-confidence speculative noise (short acronyms); `--min-confidence`
+- [ ] dedup across differing word counts / via embedding similarity (prefix only
+      handles same-length phrases today)
+- [ ] amortized/auto-prune (e.g. occasional GC after analysis) + age-based
+      staleness (`last_seen`)
 - [ ] mine alternative expansions for *known* acronyms too (currently candidates
       only)
+- [ ] fzf preview pane showing where each candidate/phrase was seen
 
 ## Feature requests / backlog
 

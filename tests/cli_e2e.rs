@@ -370,6 +370,73 @@ fn suggest_surfaces_mined_expansions_with_confidence() {
 }
 
 #[test]
+fn define_adds_multiple_expansions_at_once() {
+    let sock = scratch_socket("define");
+    let out = run(
+        &sock,
+        &[
+            "define",
+            "MVP",
+            "Minimum Viable Product",
+            "Most Valuable Player",
+            "-j",
+        ],
+        None,
+    );
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["added"].as_array().unwrap().len(), 2);
+    // Both are now in the dictionary.
+    let show = run(&sock, &["show", "MVP", "-j"], None);
+    let s: serde_json::Value = serde_json::from_str(&show.stdout).unwrap();
+    assert_eq!(s.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn prune_dedups_prefix_variants() {
+    let sock = scratch_socket("prune");
+    // Two near-duplicate speculative expansions accrue for MVP.
+    run(&sock, &[], Some("the MVP is a min viable product"));
+    run(&sock, &[], Some("our MVP, a minimum viable product"));
+
+    let p = run(&sock, &["prune", "-j"], None);
+    let pv: serde_json::Value = serde_json::from_str(&p.stdout).unwrap();
+    assert!(
+        pv["merged"].as_i64().unwrap() >= 1,
+        "nothing merged: {}",
+        p.stdout
+    );
+
+    // Deduped to the fuller canonical form.
+    let after = run(
+        &sock,
+        &["suggest", "MVP", "--min-confidence", "0", "-j"],
+        None,
+    );
+    let av: serde_json::Value = serde_json::from_str(&after.stdout).unwrap();
+    assert!(
+        av.as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["expansion"] == "minimum viable product")
+    );
+}
+
+#[test]
+fn suggest_respects_min_confidence() {
+    let sock = scratch_socket("suggestmin");
+    run(&sock, &[], Some("the MVP plan: minimum viable product"));
+    // An impossible threshold hides everything.
+    let hidden = run(
+        &sock,
+        &["suggest", "MVP", "--min-confidence", "1.1", "-j"],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&hidden.stdout).unwrap();
+    assert!(v.as_array().unwrap().is_empty());
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));

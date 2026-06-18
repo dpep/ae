@@ -81,7 +81,18 @@ ae search perf                        # substring search over acronyms + expansi
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
 ae suggest MVP                        # speculative expansions mined from text
+ae define MVP "Minimum Viable Product" "Most Valuable Player"   # promote (multi)
+ae prune                              # GC: dedup + drop low-confidence/noise
 ```
+
+`ae define MVP` with no expansions picks interactively from the mined
+suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An
+acronym can hold several expansions, so multi-select is first-class.
+
+`ae prune` is the occasional GC: it merges prefix-duplicate expansions
+("min viable product" → "minimum viable product"), drops ones below a confidence
+floor (default 0.15, `--min-confidence` to override — same flag on `suggest`),
+and removes seen-once noise candidates.
 
 `ae suggest` is the payoff of tracking candidates. When `ae` analyzes text it
 mines word-sequences whose initials spell a watched candidate acronym — no
