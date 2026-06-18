@@ -122,6 +122,20 @@ commit.
 - [x] candidate tracking — every analysis (not read-only) records undefined
       acronym-shaped tokens with occurrence counts (`candidate_acronyms` table);
       defining an acronym clears it. Surfaced via `ae candidates`
+- [x] speculative expansion mining — when a candidate appears in text, scan the
+      same text for consecutive word-sequences whose initials spell it (no
+      parens) and count recurrences (`potential_expansions`); `ae suggest [ACR]`
+      ranks them with confidence (share of the acronym's sightings). Defining an
+      acronym clears its suggestions
+
+### Speculation — next steps
+
+- [ ] interactive `ae define <ACR>` — prompt with ranked suggestions, confirm → add
+- [ ] dedup near-identical expansions ("minimum viable product" ≈ "min viable
+      product") via normalization/embedding similarity
+- [ ] subsequence mining (skip function words, e.g. OKR = Objectives *and* Key
+      Results) with a precision guard; optional cross-text mining for definitions
+      that never co-occur with the acronym
 
 ## Feature requests / backlog
 

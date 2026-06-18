@@ -246,9 +246,9 @@ fn ensure_ort_dylib() {
     }
 }
 
-/// Directories searched for a named model, in order: `$AE_MODELS_DIR`, the user
-/// cache, a dir alongside the executable, and Homebrew's share dir — so a model
-/// installed by `brew install ae` is reachable by name even from a dev build.
+/// Directories searched for a named model, in priority order: `$AE_MODELS_DIR`,
+/// the user cache, then explicit Homebrew share dirs, and finally a dir relative
+/// to the executable (a generic guess, so it's the last resort).
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(d) = std::env::var_os("AE_MODELS_DIR") {
@@ -259,16 +259,21 @@ fn search_dirs() -> Vec<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
     dirs.push(cache_base.join("ae").join("models"));
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        dirs.push(dir.join("../share/ae/models"));
-    }
+
+    // A Homebrew-installed model lives under <prefix>/share/ae/models.
     if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX") {
         dirs.push(PathBuf::from(prefix).join("share/ae/models"));
     }
     dirs.push(PathBuf::from("/opt/homebrew/share/ae/models"));
     dirs.push(PathBuf::from("/usr/local/share/ae/models"));
+
+    // Last resort: relative to the binary (catches non-standard brew prefixes
+    // like Linuxbrew, but unlikely to exist otherwise).
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.join("../share/ae/models"));
+    }
     dirs
 }
 

@@ -63,10 +63,14 @@ impl Engine {
         let learned = self.learn_and_persist(text)?;
         let candidates = candidate_acronyms(text, &expansions, &learned);
 
-        // Track how often we see undefined acronyms (analysis only — read-only
-        // analysis leaves no trace).
+        // Track how often we see undefined acronyms, and mine the text for
+        // speculative expansions (phrases whose initials spell them). Analysis
+        // only — read-only leaves no trace.
         for candidate in &candidates {
             self.store.record_candidate(candidate)?;
+            for phrase in mine_potentials(text, candidate) {
+                self.store.record_potential(candidate, &phrase)?;
+            }
         }
 
         Ok(AnalysisPayload {
@@ -171,6 +175,45 @@ impl Engine {
     pub fn candidate_counts(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         self.store.candidates()
     }
+
+    /// Speculative expansions mined for `acronym`, with occurrence counts.
+    pub fn potentials_for(&self, acronym: &str) -> rusqlite::Result<Vec<(String, i64)>> {
+        self.store.potentials_for(acronym)
+    }
+}
+
+/// Mine `text` for phrases whose word-initials spell `acronym` — speculative
+/// expansions casually mentioned in the same text (no parens required). Uses a
+/// strict window of consecutive words (precise; misses skipped function words),
+/// de-duplicated within the text.
+fn mine_potentials(text: &str, acronym: &str) -> Vec<String> {
+    let target: Vec<char> = acronym.chars().map(|c| c.to_ascii_uppercase()).collect();
+    let len = target.len();
+
+    // Words trimmed of edge punctuation; drop any that are left empty.
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() < len {
+        return Vec::new();
+    }
+
+    let mut found = Vec::new();
+    for window in words.windows(len) {
+        let initials: Vec<char> = window
+            .iter()
+            .map(|w| w.chars().next().unwrap().to_ascii_uppercase())
+            .collect();
+        if initials == target {
+            let phrase = window.join(" ").to_lowercase();
+            if !found.contains(&phrase) {
+                found.push(phrase);
+            }
+        }
+    }
+    found
 }
 
 /// Split text into alphanumeric tokens, preserving each token's original
@@ -342,6 +385,39 @@ mod tests {
         let e = Engine::in_memory().unwrap();
         e.expand_only("ship the MVP").unwrap();
         assert!(e.candidate_counts().unwrap().is_empty());
+        assert!(e.potentials_for("MVP").unwrap().is_empty());
+    }
+
+    #[test]
+    fn mines_speculative_expansions_from_the_same_text() {
+        let e = Engine::in_memory().unwrap();
+        // No parens — the phrase is just mentioned in the text mentioning MVP.
+        e.analyze("the MVP roadmap calls for a minimum viable product first")
+            .unwrap();
+        let pots = e.potentials_for("MVP").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+    }
+
+    #[test]
+    fn speculative_expansions_accrue_with_recurrence() {
+        let e = Engine::in_memory().unwrap();
+        e.analyze("MVP today means minimum viable product").unwrap();
+        e.analyze("our MVP is the minimum viable product").unwrap();
+        let pots = e.potentials_for("MVP").unwrap();
+        let count = pots
+            .iter()
+            .find(|(p, _)| p == "minimum viable product")
+            .map(|(_, c)| *c);
+        assert_eq!(count, Some(2));
+    }
+
+    #[test]
+    fn defining_an_acronym_clears_its_speculation() {
+        let e = Engine::in_memory().unwrap();
+        e.analyze("MVP — minimum viable product").unwrap();
+        assert!(!e.potentials_for("MVP").unwrap().is_empty());
+        e.analyze("MVP (Minimum Viable Product)").unwrap(); // inline definition
+        assert!(e.potentials_for("MVP").unwrap().is_empty());
     }
 
     #[test]

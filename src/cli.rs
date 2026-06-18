@@ -115,6 +115,9 @@ pub enum Command {
     Add { acronym: String, expansion: String },
     /// List candidate acronyms (seen but undefined) by frequency.
     Candidates,
+    /// Suggest speculative expansions mined from text, with confidence.
+    /// Optionally for one acronym.
+    Suggest { acronym: Option<String> },
     /// Remove an acronym. Bare `rm ACR` removes it when there's one expansion;
     /// otherwise pass a substring to pick one, or `--all` to remove every one.
     #[command(visible_alias = "delete")]
@@ -348,12 +351,49 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             }
             Err(e) => fail(fmt, &format!("dictionary error: {e}")),
         },
+        Command::Suggest { acronym } => run_suggest(&store, fmt, acronym.as_deref()),
         Command::Rm {
             acronym,
             expansion,
             all,
         } => run_rm(&store, fmt, acronym, expansion.as_deref(), *all),
     }
+}
+
+/// Build and render speculative expansions with confidence (each expansion's
+/// share of its acronym's total sightings).
+fn run_suggest(store: &crate::store::Store, fmt: Format, acronym: Option<&str>) -> ExitCode {
+    let raw = match acronym {
+        Some(acr) => store.potentials_for(acr).map(|v| {
+            v.into_iter()
+                .map(|(exp, n)| (acr.to_uppercase(), exp, n))
+                .collect()
+        }),
+        None => store.all_potentials(),
+    };
+    let rows = match raw {
+        Ok(rows) => rows,
+        Err(e) => return fail(fmt, &format!("dictionary error: {e}")),
+    };
+
+    // Confidence = an expansion's share of its acronym's total sightings.
+    let mut totals: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+    for (acr, _, n) in &rows {
+        *totals.entry(acr.as_str()).or_insert(0) += n;
+    }
+    let scored: Vec<(String, String, i64, f32)> = rows
+        .iter()
+        .map(|(acr, exp, n)| {
+            let total = totals[acr.as_str()].max(1);
+            (acr.clone(), exp.clone(), *n, *n as f32 / total as f32)
+        })
+        .collect();
+
+    let stdout = io::stdout();
+    if let Err(e) = output::render_suggestions(&mut stdout.lock(), &scored, fmt) {
+        return fail(fmt, &format!("render failed: {e}"));
+    }
+    ExitCode::SUCCESS
 }
 
 /// Resolve and execute a removal, disambiguating among multiple expansions.

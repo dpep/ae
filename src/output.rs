@@ -115,6 +115,44 @@ pub fn render_candidates(
     Ok(())
 }
 
+/// Render speculative expansions: `(acronym, expansion, count, confidence)`.
+pub fn render_suggestions(
+    out: &mut impl Write,
+    rows: &[(String, String, i64, f32)],
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => {
+            if rows.is_empty() {
+                return writeln!(out, "No suggestions yet.");
+            }
+            for (acronym, expansion, count, confidence) in rows {
+                writeln!(
+                    out,
+                    "{acronym:<8} {expansion:<40} {confidence:.2} ({count})"
+                )?;
+            }
+        }
+        Format::Json => {
+            let items: Vec<_> = rows
+                .iter()
+                .map(|(a, e, n, c)| json!({ "acronym": a, "expansion": e, "count": n, "confidence": c }))
+                .collect();
+            writeln!(out, "{}", serde_json::to_string_pretty(&items).unwrap())?;
+        }
+        Format::Ndjson => {
+            for (a, e, n, c) in rows {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "acronym": a, "expansion": e, "count": n, "confidence": c })
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One analyzed line of a batch run: its number, original text, and findings.
 pub struct LineResult {
     pub line: usize,

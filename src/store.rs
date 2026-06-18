@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS candidate_acronyms (
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Speculative expansions for candidates: phrases whose word-initials spell the
+-- acronym, mined from text that mentions it. Recurrence drives confidence.
+CREATE TABLE IF NOT EXISTS potential_expansions (
+    acronym TEXT NOT NULL,
+    expansion TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (acronym, expansion)
+);
 ";
 
 /// A small built-in dictionary so expansion works on a fresh database.
@@ -126,11 +137,56 @@ impl Store {
     }
 
     fn clear_candidate(&self, acronym: &str) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
         self.conn.execute(
             "DELETE FROM candidate_acronyms WHERE acronym = ?1",
-            params![acronym.trim().to_uppercase()],
+            params![acronym],
+        )?;
+        self.conn.execute(
+            "DELETE FROM potential_expansions WHERE acronym = ?1",
+            params![acronym],
         )?;
         Ok(())
+    }
+
+    /// Record one sighting of a speculative expansion for a candidate acronym.
+    pub fn record_potential(&self, acronym: &str, expansion: &str) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
+        let expansion = expansion.trim().to_lowercase();
+        if acronym.is_empty() || expansion.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO potential_expansions (acronym, expansion, count) VALUES (?1, ?2, 1)
+             ON CONFLICT(acronym, expansion) DO UPDATE SET count = count + 1, last_seen = CURRENT_TIMESTAMP",
+            params![acronym, expansion],
+        )?;
+        Ok(())
+    }
+
+    /// Speculative `(expansion, count)` pairs for one acronym, most-seen first.
+    pub fn potentials_for(&self, acronym: &str) -> Result<Vec<(String, i64)>> {
+        let acronym = acronym.trim().to_uppercase();
+        let mut stmt = self.conn.prepare(
+            "SELECT expansion, count FROM potential_expansions
+             WHERE acronym = ?1 ORDER BY count DESC, expansion",
+        )?;
+        let rows = stmt
+            .query_map(params![acronym], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// All speculative `(acronym, expansion, count)` triples, for `suggest`.
+    pub fn all_potentials(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, expansion, count FROM potential_expansions
+             ORDER BY acronym, count DESC, expansion",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Seed the built-in dictionary if the table is empty. Returns the number of

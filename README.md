@@ -80,7 +80,23 @@ ae list                               # list everything
 ae search perf                        # substring search over acronyms + expansions
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
+ae suggest MVP                        # speculative expansions mined from text
 ```
+
+`ae suggest` is the payoff of tracking candidates: when a candidate acronym
+appears in text, `ae` also scans that text for word-sequences whose initials
+spell it (no parentheses needed) and counts how often each recurs. Confidence is
+each phrase's share of the acronym's sightings:
+
+```
+$ ae suggest MVP
+MVP   minimum viable product    0.50 (2)
+MVP   min viable product        0.25 (1)
+MVP   most valuable player      0.25 (1)
+```
+
+Confirm one with `ae add MVP "Minimum Viable Product"` (which clears it from the
+candidate/suggestion lists).
 
 Removal disambiguates when an acronym has several expansions:
 

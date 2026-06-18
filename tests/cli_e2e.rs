@@ -347,6 +347,29 @@ fn candidates_command_lists_undefined_acronyms_with_counts() {
 }
 
 #[test]
+fn suggest_surfaces_mined_expansions_with_confidence() {
+    let sock = scratch_socket("suggest");
+    // MVP is undefined; the phrase is mentioned in the same text (no parens).
+    run(
+        &sock,
+        &[],
+        Some("the MVP plan: minimum viable product, then iterate"),
+    );
+    let out = run(&sock, &["suggest", "MVP", "-j"], None);
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["expansion"] == "minimum viable product"
+                && s["confidence"].as_f64().unwrap() > 0.0),
+        "no suggestion mined: {}",
+        out.stdout
+    );
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));
