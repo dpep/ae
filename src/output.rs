@@ -88,10 +88,11 @@ pub fn render_entries(
     Ok(())
 }
 
-/// Render candidate acronyms with their occurrence counts (most-seen first).
+/// Render candidate acronyms with `(count, source, on-watch-list)` — the
+/// provenance and watch state, for observability.
 pub fn render_candidates(
     out: &mut impl Write,
-    candidates: &[(String, i64)],
+    candidates: &[(String, i64, String, bool)],
     format: Format,
 ) -> std::io::Result<()> {
     match format {
@@ -99,20 +100,25 @@ pub fn render_candidates(
             if candidates.is_empty() {
                 return writeln!(out, "No candidates.");
             }
-            for (acronym, count) in candidates {
-                writeln!(out, "{acronym:<8} {count}")?;
+            for (acronym, count, source, watching) in candidates {
+                let watch = if *watching { "watching" } else { "" };
+                writeln!(out, "{acronym:<8} {count:>4}  {source:<9} {watch}")?;
             }
         }
         Format::Json => {
             let rows: Vec<_> = candidates
                 .iter()
-                .map(|(a, n)| json!({ "acronym": a, "count": n }))
+                .map(|(a, n, s, w)| json!({ "acronym": a, "count": n, "source": s, "watching": w }))
                 .collect();
             writeln!(out, "{}", serde_json::to_string_pretty(&rows).unwrap())?;
         }
         Format::Ndjson => {
-            for (acronym, count) in candidates {
-                writeln!(out, "{}", json!({ "acronym": acronym, "count": count }))?;
+            for (acronym, count, source, watching) in candidates {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "acronym": acronym, "count": count, "source": source, "watching": watching })
+                )?;
             }
         }
     }

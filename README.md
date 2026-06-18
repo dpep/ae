@@ -108,6 +108,11 @@ match wins over its parts (`PB&J` beats `PB`, maximal munch).
 (`/usr/share/dict/words`, if present — nothing bundled), so "minimum viabel
 product" converges to "minimum viable product" before dedup.
 
+You rarely need to run it by hand: a cheap subset (dedup + drop low-confidence +
+clear noise, no spell-fix) runs **automatically** with a small random chance
+after each write — in-process and, especially, in the warm daemon — to amortize
+the cost. Tune or disable it with `AE_GC_PERCENT` (default `5`, `0` off).
+
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An
 acronym can hold several expansions, so multi-select is first-class.

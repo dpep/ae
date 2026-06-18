@@ -16,9 +16,28 @@ use crate::trie::SharedTrie;
 use crate::types::{AnalysisPayload, ExpansionResult, MatchCandidate};
 use crate::{learn, types::Extraction};
 
-/// An acronym must be seen this often (or be declared) before it joins the
-/// watch list and we mine its expansions from unrelated text.
-const WATCH_THRESHOLD: i64 = 3;
+use crate::store::WATCH_THRESHOLD;
+
+/// Whether to run the amortized GC after a write — a small random chance
+/// (`AE_GC_PERCENT`, default 5; `0` disables, used by tests). Cheap entropy from
+/// the clock; this is sampling, not security.
+pub fn should_gc() -> bool {
+    let percent: u32 = std::env::var("AE_GC_PERCENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    if percent == 0 {
+        return false;
+    }
+    if percent >= 100 {
+        return true;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    (nanos % 100) < percent
+}
 
 /// Acronym-shaped tokens with internal punctuation (`PB&J`, `R&D`, `U.S.A`) that
 /// the plain alphanumeric tokenizer would split apart.
@@ -205,6 +224,27 @@ impl Engine {
             .into_iter()
             .map(|(expansion, count, _coh)| (expansion, count))
             .collect())
+    }
+
+    /// Amortized GC: dedup mined expansions, drop low-confidence ones, and prune
+    /// noise candidates. The cheap subset of `ae prune` (no spell-correction),
+    /// run occasionally after a write to spread the cost — see [`should_gc`].
+    pub fn gc(&self, min_confidence: f32) -> rusqlite::Result<()> {
+        for acronym in self.store.distinct_potential_acronyms()? {
+            self.store.dedup_potentials(&acronym)?;
+        }
+        let all = self.store.all_potentials()?;
+        let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (acronym, _, count, _) in &all {
+            *totals.entry(acronym.clone()).or_insert(0) += count;
+        }
+        for (acronym, expansion, count, coh) in all {
+            if crate::store::confidence(count, coh, totals[&acronym]) < min_confidence {
+                self.store.delete_potential(&acronym, &expansion)?;
+            }
+        }
+        self.store.prune_noise_candidates()?;
+        Ok(())
     }
 
     /// Record candidates, mine speculative expansions (same-text and, for other
@@ -589,6 +629,20 @@ mod tests {
         e.analyze("we scoped a minimum viable product for launch")
             .unwrap();
         let pots = e.potentials_for("MVP").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+    }
+
+    #[test]
+    fn gc_dedups_and_prunes() {
+        let e = Engine::in_memory().unwrap();
+        e.declare_acronym("MVP").unwrap();
+        // Cross-text mining (MVP declared) records two near-duplicate phrases.
+        e.analyze("we want a minimum viable product").unwrap();
+        e.analyze("ship a min viable product too").unwrap();
+        assert_eq!(e.potentials_for("MVP").unwrap().len(), 2);
+        e.gc(0.0).unwrap(); // min_confidence 0 → only dedup, no drops
+        let pots = e.potentials_for("MVP").unwrap();
+        assert_eq!(pots.len(), 1);
         assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
     }
 

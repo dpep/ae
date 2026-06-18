@@ -194,16 +194,17 @@ candidate).
       vs `seen` (auto-detected). An acronym joins the **watch list** (cross-text
       mining) once declared or seen `count` >= `WATCH_THRESHOLD` (3); `prune`
       keeps declared candidates, drops seldom-seen `seen` ones
-- [ ] tune `WATCH_THRESHOLD`; show provenance/watch state in `ae candidates`
-
-### Speculation — next steps
+- [x] `ae candidates` shows provenance (`declared`/`seen`) + watch state
+- [x] amortized auto-GC: `should_gc()` (random `AE_GC_PERCENT`, default 5; `0`
+      disables for tests) runs `Engine::gc` (dedup + drop low-conf + prune noise,
+      no spell) after a write, in-process and in the warm daemon
+- [ ] tune `WATCH_THRESHOLD` / `AE_GC_PERCENT`
 
 ### Speculation — next steps
 
 - [ ] dedup across differing word counts / via embedding similarity (prefix only
       handles same-length phrases today)
-- [ ] amortized/auto-prune (e.g. occasional GC after analysis) + age-based
-      staleness (`last_seen`)
+- [ ] age-based staleness in GC (`last_seen`)
 - [ ] mine alternative expansions for *known* acronyms too (currently candidates
       only)
 - [ ] fzf preview pane showing where each candidate/phrase was seen

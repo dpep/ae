@@ -213,6 +213,10 @@ fn handle_connection(
                 log::warn!("analysis failed: {e}");
                 AnalysisPayload::empty(text)
             });
+            // The warm daemon amortizes GC across requests.
+            if !read_only && crate::engine::should_gc() {
+                let _ = engine.gc(crate::store::PRUNE_MIN_CONFIDENCE);
+            }
             write_frame(&mut stream, &serde_json::to_vec(&payload)?)?;
         }
         Request::Ping => write_frame(&mut stream, b"\x01")?,

@@ -66,6 +66,14 @@ CREATE TABLE IF NOT EXISTS candidate_contexts (
 );
 ";
 
+/// How often an acronym must be *seen* (or be declared) before it joins the
+/// watch list and we mine its expansions from unrelated text.
+pub const WATCH_THRESHOLD: i64 = 3;
+
+/// Confidence floor `prune` (and the amortized GC) discard mined expansions
+/// below. `suggest` keeps a higher bar of its own.
+pub const PRUNE_MIN_CONFIDENCE: f32 = 0.15;
+
 /// A small built-in dictionary so expansion works on a fresh database.
 pub const DEFAULT_DICTIONARY: &[(&str, &str)] = &[
     ("OKR", "Objectives and Key Results"),
@@ -189,6 +197,18 @@ impl Store {
         )?;
         let rows = stmt
             .query_map(params![min_count], |row| row.get(0))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Candidate acronyms with their `(count, source)`, most-seen first — for
+    /// the `candidates` view (provenance + watch state).
+    pub fn candidates_detailed(&self) -> Result<Vec<(String, i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, count, source FROM candidate_acronyms ORDER BY count DESC, acronym",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -574,6 +594,17 @@ pub fn source_validity(source: &str) -> f32 {
     }
 }
 
+/// Blend recurrence and coherence into a `[0, 1]` confidence for a mined
+/// expansion: `share` (its fraction of the acronym's sightings) and `mean_coh`
+/// (average context coherence) weighted equally, then damped so a lone sighting
+/// can't reach certainty. Shared by `suggest`/`prune` and the amortized GC.
+pub fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
+    let count = count.max(1) as f32;
+    let share = count / total.max(1) as f32;
+    let mean_coh = (coh_sum as f32 / count).clamp(0.0, 1.0);
+    ((0.5 * share + 0.5 * mean_coh) * (count / (count + 1.0))).clamp(0.0, 1.0)
+}
+
 /// Two mined expansions should be merged if they're prefix-compatible *or*
 /// within a small edit distance (a typo/misspelling) — the fuzzy dedup `prune`
 /// applies.
@@ -767,6 +798,14 @@ mod tests {
                 .any(|(e, c, _)| e == "minimum viable product" && *c == 2)
         );
         assert!(pots.iter().any(|(e, _, _)| e == "most valuable player"));
+    }
+
+    #[test]
+    fn confidence_rewards_recurrence_and_coherence() {
+        let strong = confidence(4, 4.0, 5); // share 0.8, coherence 1.0
+        let weak = confidence(1, 0.1, 5); // share 0.2, coherence 0.1
+        assert!(strong > weak);
+        assert!((0.0..=1.0).contains(&strong) && (0.0..=1.0).contains(&weak));
     }
 
     #[test]

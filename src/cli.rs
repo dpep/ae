@@ -120,11 +120,9 @@ pub enum Command {
         acronym: String,
         expansions: Vec<String>,
     },
-    /// List candidate acronyms (seen but undefined) by frequency.
+    /// List candidate acronyms (seen but undefined) with provenance + watch
+    /// state, by frequency.
     Candidates,
-    /// Declare a token is an acronym — `ae` then always mines its expansions
-    /// and never prunes it, even before it's been seen often.
-    Watch { acronym: String },
     /// Suggest speculative expansions mined from text, with confidence.
     /// Optionally for one acronym.
     Suggest {
@@ -247,10 +245,14 @@ pub fn run() -> ExitCode {
 fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::AnalysisPayload> {
     let engine = Engine::open(&cli.db_path(), cli.model.as_deref())?;
     if cli.read_only {
-        engine.expand_only(text)
-    } else {
-        engine.analyze(text)
+        return engine.expand_only(text);
     }
+    let payload = engine.analyze(text)?;
+    // Amortize GC across writes (skip on a best-effort error).
+    if crate::engine::should_gc() {
+        let _ = engine.gc(crate::store::PRUNE_MIN_CONFIDENCE);
+    }
+    Ok(payload)
 }
 
 /// Batch mode: analyze each input line with one warm in-process engine and emit
@@ -376,10 +378,18 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             });
             emit_entries(fmt, entries)
         }
-        Command::Candidates => match store.candidates() {
-            Ok(candidates) => {
+        Command::Candidates => match store.candidates_detailed() {
+            Ok(rows) => {
+                // (acronym, count, source, on watch list)
+                let rows: Vec<(String, i64, String, bool)> = rows
+                    .into_iter()
+                    .map(|(a, n, source)| {
+                        let watching = source == "declared" || n >= crate::store::WATCH_THRESHOLD;
+                        (a, n, source, watching)
+                    })
+                    .collect();
                 let stdout = io::stdout();
-                if let Err(e) = output::render_candidates(&mut stdout.lock(), &candidates, fmt) {
+                if let Err(e) = output::render_candidates(&mut stdout.lock(), &rows, fmt) {
                     return fail(fmt, &format!("render failed: {e}"));
                 }
                 ExitCode::SUCCESS
@@ -397,15 +407,6 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             min_confidence.unwrap_or(SUGGEST_MIN_CONFIDENCE),
             *limit,
         ),
-        Command::Watch { acronym } => match store.declare_acronym(acronym) {
-            Ok(()) => status(
-                fmt,
-                quiet,
-                "watching",
-                &format!("now watching {} for expansions", acronym.to_uppercase()),
-            ),
-            Err(e) => fail(fmt, &format!("watch failed: {e}")),
-        },
         Command::Add {
             acronym,
             expansions,
@@ -418,7 +419,7 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             &store,
             fmt,
             quiet,
-            min_confidence.unwrap_or(PRUNE_MIN_CONFIDENCE),
+            min_confidence.unwrap_or(crate::store::PRUNE_MIN_CONFIDENCE),
         ),
         Command::Rm {
             acronym,
@@ -471,9 +472,8 @@ fn run_add(
 }
 
 /// `suggest` hides anything below this (keep the bar high — speculation is
-/// noisy). `prune` is gentler, only discarding genuine low-signal rows.
+/// noisy); `prune`/GC use the gentler `store::PRUNE_MIN_CONFIDENCE`.
 const SUGGEST_MIN_CONFIDENCE: f32 = 0.30;
-const PRUNE_MIN_CONFIDENCE: f32 = 0.15;
 
 /// Score speculative expansions: `(acronym, expansion, count, confidence)`,
 /// for one acronym or all. Shared by `suggest`, `define`, and `prune`.
@@ -496,7 +496,7 @@ fn score_potentials(
     Ok(raw
         .into_iter()
         .map(|(acr, exp, n, coh)| {
-            let conf = confidence(n, coh, totals[&acr]);
+            let conf = crate::store::confidence(n, coh, totals[&acr]);
             (acr, exp, n, conf)
         })
         .collect())
@@ -532,17 +532,6 @@ fn run_suggest(
         return fail(fmt, &format!("render failed: {e}"));
     }
     ExitCode::SUCCESS
-}
-
-/// Blend recurrence and coherence into a `[0, 1]` confidence: `share` (this
-/// expansion's fraction of the acronym's sightings) and `mean_coh` (average
-/// context coherence) weighted equally, then damped so a lone sighting can't
-/// reach certainty.
-fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
-    let count = count.max(1) as f32;
-    let share = count / total.max(1) as f32;
-    let mean_coh = (coh_sum as f32 / count).clamp(0.0, 1.0);
-    ((0.5 * share + 0.5 * mean_coh) * (count / (count + 1.0))).clamp(0.0, 1.0)
 }
 
 /// GC speculation: spell-correct mined expansions, dedup (prefix + fuzzy), drop
@@ -870,19 +859,4 @@ fn fail(fmt: Format, msg: &str) -> ExitCode {
         _ => eprintln!("{}", serde_json::json!({ "error": msg })),
     }
     ExitCode::FAILURE
-}
-
-#[cfg(test)]
-mod tests {
-    use super::confidence;
-
-    #[test]
-    fn confidence_rewards_recurrence_and_coherence() {
-        // Dominant, recurring, on-topic expansion vs a lone off-topic match.
-        let strong = confidence(4, 4.0, 5); // share 0.8, coherence 1.0
-        let weak = confidence(1, 0.1, 5); // share 0.2, coherence 0.1
-        assert!(strong > weak);
-        assert!((0.0..=1.0).contains(&strong));
-        assert!((0.0..=1.0).contains(&weak));
-    }
 }

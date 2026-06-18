@@ -33,6 +33,7 @@ fn run(socket: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Output {
         .arg("--db")
         .arg(socket.with_extension("db"))
         .args(args)
+        .env("AE_GC_PERCENT", "0") // deterministic: no random GC during tests
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -554,12 +555,22 @@ fn punctuated_acronym_is_a_candidate_and_mines() {
 }
 
 #[test]
-fn watch_declares_an_acronym() {
-    let sock = scratch_socket("watchcmd");
-    let out = run(&sock, &["watch", "MVP", "-j"], None);
+fn add_without_expansion_declares_an_acronym() {
+    let sock = scratch_socket("declare");
+    // `add ACR` with no expansion declares it (was the `watch` command).
+    let out = run(&sock, &["add", "MVP", "-j"], None);
     assert!(out.success, "stderr: {}", out.stderr);
     let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(v["status"], "watching");
+    // It shows up as a declared candidate.
+    let c = run(&sock, &["candidates", "-j"], None);
+    let cv: serde_json::Value = serde_json::from_str(&c.stdout).unwrap();
+    assert!(
+        cv.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["acronym"] == "MVP" && r["source"] == "declared" && r["watching"] == true)
+    );
 }
 
 #[test]
