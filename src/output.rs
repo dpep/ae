@@ -36,15 +36,50 @@ fn render_human(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Res
             )?;
         }
     }
-    for c in &payload.learned_candidates {
+    for c in &payload.extractions {
         writeln!(
             out,
-            "{:<8} {:<40} learned   {:.2}",
+            "{:<8} {:<40} extraction {:.2}",
             c.acronym, c.extracted_definition, c.confidence
         )?;
     }
-    for acronym in &payload.unknown {
-        writeln!(out, "{:<8} {:<40} unknown", acronym, "(no expansion)")?;
+    for acronym in &payload.candidates {
+        writeln!(out, "{:<8} {:<40} candidate", acronym, "(no expansion)")?;
+    }
+    Ok(())
+}
+
+/// Render a list of `(acronym, expansion)` dictionary entries (list/show/search).
+pub fn render_entries(
+    out: &mut impl Write,
+    entries: &[(String, String)],
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => {
+            if entries.is_empty() {
+                return writeln!(out, "No acronyms.");
+            }
+            for (acronym, expansion) in entries {
+                writeln!(out, "{acronym:<8} {expansion}")?;
+            }
+        }
+        Format::Json => {
+            let rows: Vec<_> = entries
+                .iter()
+                .map(|(a, e)| json!({ "acronym": a, "expansion": e }))
+                .collect();
+            writeln!(out, "{}", serde_json::to_string_pretty(&rows).unwrap())?;
+        }
+        Format::Ndjson => {
+            for (acronym, expansion) in entries {
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "acronym": acronym, "expansion": expansion })
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -124,9 +159,9 @@ fn build_hits(results: &[LineResult]) -> Vec<Hit> {
                 });
             }
         }
-        for c in &r.payload.learned_candidates {
+        for c in &r.payload.extractions {
             hits.push(Hit {
-                kind: "learned",
+                kind: "extraction",
                 line: r.line,
                 col: col_of(&r.text, &c.acronym),
                 acronym: c.acronym.clone(),
@@ -135,9 +170,9 @@ fn build_hits(results: &[LineResult]) -> Vec<Hit> {
                 pattern_type: Some(c.pattern_type.clone()),
             });
         }
-        for acronym in &r.payload.unknown {
+        for acronym in &r.payload.candidates {
             hits.push(Hit {
-                kind: "unknown",
+                kind: "candidate",
                 line: r.line,
                 col: col_of(&r.text, acronym),
                 acronym: acronym.clone(),
@@ -171,9 +206,9 @@ fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Re
             writeln!(out, "{line}")?;
         }
     }
-    for c in &payload.learned_candidates {
+    for c in &payload.extractions {
         let line = json!({
-            "kind": "learned",
+            "kind": "extraction",
             "acronym": c.acronym,
             "expansion": c.extracted_definition,
             "pattern_type": c.pattern_type,
@@ -181,8 +216,8 @@ fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Re
         });
         writeln!(out, "{line}")?;
     }
-    for acronym in &payload.unknown {
-        let line = json!({ "kind": "unknown", "acronym": acronym });
+    for acronym in &payload.candidates {
+        let line = json!({ "kind": "candidate", "acronym": acronym });
         writeln!(out, "{line}")?;
     }
     Ok(())
@@ -191,7 +226,7 @@ fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExpansionResult, LearnedCandidate, MatchCandidate};
+    use crate::types::{ExpansionResult, Extraction, MatchCandidate};
 
     fn sample() -> AnalysisPayload {
         AnalysisPayload {
@@ -204,13 +239,13 @@ mod tests {
                     confidence: 0.8,
                 }],
             }],
-            learned_candidates: vec![LearnedCandidate {
+            extractions: vec![Extraction {
                 acronym: "KPI".into(),
                 extracted_definition: "Key Performance Indicator".into(),
                 pattern_type: "alpha".into(),
                 confidence: 0.95,
             }],
-            unknown: vec!["MVP".into()],
+            candidates: vec!["MVP".into()],
         }
     }
 
@@ -224,9 +259,9 @@ mod tests {
     fn human_mentions_each_category() {
         let s = rendered(Format::Human);
         assert!(s.contains("expansion"));
-        assert!(s.contains("learned"));
+        assert!(s.contains("extraction"));
         assert!(s.contains("Key Performance Indicator"));
-        assert!(s.contains("unknown") && s.contains("MVP"));
+        assert!(s.contains("candidate") && s.contains("MVP"));
     }
 
     #[test]
@@ -240,7 +275,7 @@ mod tests {
     fn ndjson_is_one_object_per_line() {
         let s = rendered(Format::Ndjson);
         let lines: Vec<&str> = s.lines().collect();
-        assert_eq!(lines.len(), 3); // expansion + learned + unknown
+        assert_eq!(lines.len(), 3); // expansion + extraction + candidate
         for line in lines {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             assert!(v.get("kind").is_some());

@@ -10,7 +10,7 @@ use crate::mrl::{compress_matryoshka_vector, cosine_similarity};
 use crate::store::Store;
 use crate::trie::SharedTrie;
 use crate::types::{AnalysisPayload, ExpansionResult, MatchCandidate};
-use crate::{learn, types::LearnedCandidate};
+use crate::{learn, types::Extraction};
 
 pub struct Engine {
     store: Store,
@@ -61,13 +61,13 @@ impl Engine {
 
         let expansions = self.expand(text, &query_vec)?;
         let learned = self.learn_and_persist(text)?;
-        let unknown = unknown_candidates(text, &expansions, &learned);
+        let candidates = candidate_acronyms(text, &expansions, &learned);
 
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
-            learned_candidates: learned,
-            unknown,
+            extractions: learned,
+            candidates,
         })
     }
 
@@ -77,12 +77,12 @@ impl Engine {
     pub fn expand_only(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
         let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
         let expansions = self.expand(text, &query_vec)?;
-        let unknown = unknown_candidates(text, &expansions, &[]);
+        let candidates = candidate_acronyms(text, &expansions, &[]);
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
-            learned_candidates: Vec::new(),
-            unknown,
+            extractions: Vec::new(),
+            candidates,
         })
     }
 
@@ -145,7 +145,7 @@ impl Engine {
 
     /// Stage 2 — extract inline definitions, persist them (dictionary + trie +
     /// a context embedding), and return them.
-    fn learn_and_persist(&self, text: &str) -> rusqlite::Result<Vec<LearnedCandidate>> {
+    fn learn_and_persist(&self, text: &str) -> rusqlite::Result<Vec<Extraction>> {
         let learned = learn::extract(text);
         for c in &learned {
             let id = self.store.add_entry(&c.acronym, &c.extracted_definition)?;
@@ -172,10 +172,10 @@ fn tokens(text: &str) -> impl Iterator<Item = &str> {
 /// Acronym-shaped tokens in `text` that were neither expanded nor learned —
 /// distinct, in order of first appearance. These are acronyms `ae` *saw* but
 /// can't resolve, surfaced so the user can define them.
-fn unknown_candidates(
+fn candidate_acronyms(
     text: &str,
     expansions: &[ExpansionResult],
-    learned: &[LearnedCandidate],
+    learned: &[Extraction],
 ) -> Vec<String> {
     let mut resolved: std::collections::HashSet<String> =
         expansions.iter().map(|e| e.acronym.clone()).collect();
@@ -239,7 +239,7 @@ mod tests {
 
         // First pass: ZQ is unknown, so it's only a learned candidate.
         let first = e.analyze("The ZQ (Zebra Queue) is deep.").unwrap();
-        assert!(first.learned_candidates.iter().any(|c| c.acronym == "ZQ"));
+        assert!(first.extractions.iter().any(|c| c.acronym == "ZQ"));
         assert!(!first.expansions.iter().any(|r| r.acronym == "ZQ"));
 
         // Second pass: now it's known and expands.
@@ -288,7 +288,7 @@ mod tests {
         let out = e.expand_only("The ZQ (Zebra Queue) and the OKR.").unwrap();
         // Seeded OKR still expands; the inline ZQ definition is ignored.
         assert!(out.expansions.iter().any(|r| r.acronym == "OKR"));
-        assert!(out.learned_candidates.is_empty());
+        assert!(out.extractions.is_empty());
         // Nothing was persisted: a later pass still doesn't know ZQ.
         let again = e.expand_only("Drain the ZQ now.").unwrap();
         assert!(!again.expansions.iter().any(|r| r.acronym == "ZQ"));
@@ -299,18 +299,18 @@ mod tests {
         let e = Engine::in_memory().unwrap();
         let out = e.analyze("hi there MVP and OKR").unwrap();
         // MVP is acronym-shaped but unknown and undefined → flagged.
-        assert!(out.unknown.contains(&"MVP".to_string()));
+        assert!(out.candidates.contains(&"MVP".to_string()));
         // OKR is seeded → expanded, not flagged as unknown.
         assert!(out.expansions.iter().any(|r| r.acronym == "OKR"));
-        assert!(!out.unknown.contains(&"OKR".to_string()));
+        assert!(!out.candidates.contains(&"OKR".to_string()));
     }
 
     #[test]
     fn an_inline_defined_acronym_is_learned_not_unknown() {
         let e = Engine::in_memory().unwrap();
         let out = e.analyze("see the PDP (Product Detail Page)").unwrap();
-        assert!(out.learned_candidates.iter().any(|c| c.acronym == "PDP"));
-        assert!(!out.unknown.contains(&"PDP".to_string()));
+        assert!(out.extractions.iter().any(|c| c.acronym == "PDP"));
+        assert!(!out.candidates.contains(&"PDP".to_string()));
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
         assert!(
             e.analyze("the cat sat on a mat")
                 .unwrap()
-                .unknown
+                .candidates
                 .is_empty()
         );
     }

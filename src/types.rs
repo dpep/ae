@@ -22,11 +22,10 @@ pub struct ExpansionResult {
     pub matches: Vec<MatchCandidate>,
 }
 
-/// A newly discovered acronym/definition pair extracted from inline structure
-/// (e.g. `KPI (Key Performance Indicator)`), not yet necessarily in the
-/// dictionary.
+/// An acronym/definition pair extracted from inline structure in the text
+/// (e.g. `KPI (Key Performance Indicator)`).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct LearnedCandidate {
+pub struct Extraction {
     pub acronym: String,
     pub extracted_definition: String,
     /// Which rule matched — e.g. `"alpha"` or `"beta"`.
@@ -34,16 +33,17 @@ pub struct LearnedCandidate {
     pub confidence: f32,
 }
 
-/// The unified result of evaluating one chunk of text.
+/// The unified result of evaluating one chunk of text. Three buckets:
+/// **expansions** (known acronyms resolved from the dictionary),
+/// **extractions** (acronyms defined inline in this text), and **candidates**
+/// (acronym-shaped tokens we saw but can't resolve — candidates to define).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AnalysisPayload {
     pub sentence: String,
     pub expansions: Vec<ExpansionResult>,
-    pub learned_candidates: Vec<LearnedCandidate>,
-    /// Acronym-shaped tokens that were neither expanded (unknown to the
-    /// dictionary) nor defined inline — surfaced so callers know they were seen.
+    pub extractions: Vec<Extraction>,
     #[serde(default)]
-    pub unknown: Vec<String>,
+    pub candidates: Vec<String>,
 }
 
 impl AnalysisPayload {
@@ -52,13 +52,13 @@ impl AnalysisPayload {
         Self {
             sentence: sentence.into(),
             expansions: Vec::new(),
-            learned_candidates: Vec::new(),
-            unknown: Vec::new(),
+            extractions: Vec::new(),
+            candidates: Vec::new(),
         }
     }
 
-    /// True when nothing was expanded, learned, or seen as an unknown acronym.
+    /// True when nothing was expanded, extracted, or seen as a candidate.
     pub fn is_empty(&self) -> bool {
-        self.expansions.is_empty() && self.learned_candidates.is_empty() && self.unknown.is_empty()
+        self.expansions.is_empty() && self.extractions.is_empty() && self.candidates.is_empty()
     }
 }

@@ -104,9 +104,19 @@ commit.
 
 ## Evaluation
 
-- [x] unknown-acronym detection — acronym-shaped tokens (`[A-Z][A-Z0-9]{1,5}`)
-      that are neither expanded nor learned are surfaced in `payload.unknown`
-      (and as `kind:"unknown"` hits in batch)
+- [x] three output buckets: **expansions** (known), **extractions** (defined
+      inline), **candidates** (acronym-shaped but unresolved). Field/kind names:
+      `expansions`/`expansion`, `extractions`/`extraction`,
+      `candidates`/`candidate`
+- [x] candidate detection — acronym-shaped tokens (`[A-Z][A-Z0-9]{1,5}`) that are
+      neither expanded nor extracted are surfaced in `payload.candidates`
+
+## Dictionary management
+
+- [x] `ae list` / `show <ACR>` / `search <QUERY>` / `add <ACR> <EXP>` /
+      `rm <ACR> [EXP]` subcommands (no flags; `-j/-J` honored). Operate on the
+      `--db` store directly. Note: a running daemon needs `--stop` to pick up
+      manual edits (its in-memory trie is hydrated at start)
 
 ## Feature requests / backlog
 

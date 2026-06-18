@@ -126,6 +126,63 @@ impl Store {
         Ok(rows)
     }
 
+    /// Every `(acronym, expansion)` pair, ordered — for `list`.
+    pub fn all_entries(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, expansion FROM acronym_dictionary ORDER BY acronym, expansion",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Entries whose acronym or expansion contains `query` (case-insensitive).
+    pub fn search(&self, query: &str) -> Result<Vec<(String, String)>> {
+        let pattern = format!("%{}%", query.trim());
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, expansion FROM acronym_dictionary
+             WHERE acronym LIKE ?1 OR expansion LIKE ?1
+             ORDER BY acronym, expansion",
+        )?;
+        let rows = stmt
+            .query_map(params![pattern], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete every expansion of `acronym` (and its context vectors). Returns
+    /// the number of dictionary rows removed.
+    pub fn delete_acronym(&self, acronym: &str) -> Result<usize> {
+        let acronym = acronym.trim().to_uppercase();
+        self.conn.execute(
+            "DELETE FROM acronym_contexts WHERE acronym_id IN
+                 (SELECT id FROM acronym_dictionary WHERE acronym = ?1)",
+            params![acronym],
+        )?;
+        let n = self.conn.execute(
+            "DELETE FROM acronym_dictionary WHERE acronym = ?1",
+            params![acronym],
+        )?;
+        Ok(n)
+    }
+
+    /// Delete one specific `(acronym, expansion)` pair (and its context vectors).
+    pub fn delete_entry(&self, acronym: &str, expansion: &str) -> Result<usize> {
+        let acronym = acronym.trim().to_uppercase();
+        let expansion = expansion.trim();
+        self.conn.execute(
+            "DELETE FROM acronym_contexts WHERE acronym_id IN
+                 (SELECT id FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2)",
+            params![acronym, expansion],
+        )?;
+        let n = self.conn.execute(
+            "DELETE FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
+            params![acronym, expansion],
+        )?;
+        Ok(n)
+    }
+
     pub fn count(&self) -> Result<i64> {
         self.conn
             .query_row("SELECT COUNT(*) FROM acronym_dictionary", [], |row| {
@@ -209,6 +266,34 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         assert!(s.seed_defaults().unwrap() > 0);
         assert_eq!(s.seed_defaults().unwrap(), 0);
+    }
+
+    #[test]
+    fn search_matches_acronym_or_expansion() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_entry("KPI", "Key Performance Indicator").unwrap();
+        s.add_entry("OKR", "Objectives and Key Results").unwrap();
+        // Matches on the expansion text ("Key" appears in both).
+        assert_eq!(s.search("key").unwrap().len(), 2);
+        // Matches on the acronym.
+        assert_eq!(
+            s.search("kpi").unwrap(),
+            vec![("KPI".into(), "Key Performance Indicator".into())]
+        );
+        assert!(s.search("nope").unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_removes_entries_and_is_counted() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_entry("PT", "Physical Therapy").unwrap();
+        s.add_entry("PT", "Part Time").unwrap();
+        assert_eq!(s.delete_entry("PT", "Part Time").unwrap(), 1);
+        assert_eq!(s.expansions_for("PT").unwrap().len(), 1);
+        assert_eq!(s.delete_acronym("PT").unwrap(), 1);
+        assert!(s.expansions_for("PT").unwrap().is_empty());
+        // Deleting something absent removes nothing.
+        assert_eq!(s.delete_acronym("ZZ").unwrap(), 0);
     }
 
     #[test]

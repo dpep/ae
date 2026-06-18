@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::types::LearnedCandidate;
+use crate::types::Extraction;
 
 static ALPHA: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?P<acronym>[A-Z]{2,6})\s\((?P<definition>[A-Za-z\s]{4,60})\)").unwrap()
@@ -29,8 +29,8 @@ const WEAK: f32 = 0.6;
 
 /// Extract every inline acronym definition in `text`, de-duplicated by
 /// `(acronym, definition)`.
-pub fn extract(text: &str) -> Vec<LearnedCandidate> {
-    let mut out: Vec<LearnedCandidate> = Vec::new();
+pub fn extract(text: &str) -> Vec<Extraction> {
+    let mut out: Vec<Extraction> = Vec::new();
 
     for caps in ALPHA.captures_iter(text) {
         let acronym = caps["acronym"].to_string();
@@ -47,9 +47,9 @@ pub fn extract(text: &str) -> Vec<LearnedCandidate> {
 
 /// Build a candidate, realigning the definition to the acronym's initials when
 /// possible and scoring confidence by whether that alignment holds.
-fn candidate(acronym: String, raw_definition: &str, pattern_type: &str) -> LearnedCandidate {
+fn candidate(acronym: String, raw_definition: &str, pattern_type: &str) -> Extraction {
     let (definition, aligned) = realign(raw_definition, &acronym);
-    LearnedCandidate {
+    Extraction {
         acronym,
         extracted_definition: definition,
         pattern_type: pattern_type.to_string(),
@@ -99,7 +99,7 @@ fn is_subsequence(needle: &[char], haystack: &[char]) -> bool {
     needle.iter().all(|n| it.any(|h| h == n))
 }
 
-fn push_unique(out: &mut Vec<LearnedCandidate>, c: LearnedCandidate) {
+fn push_unique(out: &mut Vec<Extraction>, c: Extraction) {
     let dup = out.iter().any(|e| {
         e.acronym.eq_ignore_ascii_case(&c.acronym)
             && e.extracted_definition

@@ -3,23 +3,22 @@
 Ultra-lightweight, local-first acronym expansion and definition extraction for
 the command line and for LLM processes that need real-time jargon resolution.
 
-Feed it text; it does three things at once:
+Feed it text; it sorts the acronyms into three buckets at once:
 
-1. **Expansion** — finds known acronyms and returns their expansions, ranked.
-2. **Learning** — spots acronyms *defined inline* (`KPI (Key Performance
-   Indicator)`) and extracts the new term so the dictionary grows as it reads.
-3. **Unknown detection** — flags acronym-shaped tokens it doesn't recognize and
-   that aren't defined inline (e.g. `MVP` in "ship the MVP"), so you know it saw
-   them and can define them.
+1. **expansions** — known acronyms, resolved from the dictionary and ranked.
+2. **extractions** — acronyms *defined inline* (`KPI (Key Performance
+   Indicator)`); the new term is extracted and the dictionary grows as it reads.
+3. **candidates** — acronym-shaped tokens it doesn't recognize and that aren't
+   defined inline (e.g. `MVP` in "ship the MVP") — candidates for you to define.
 
 ```sh
 $ ae "Our KPI (Key Performance Indicator) gates the OKR review, then the MVP."
-KPI  Key Performance Indicator        learned   0.95
-OKR  Objectives and Key Results       expansion 0.80
-MVP  (no expansion)                   unknown
+KPI  Key Performance Indicator        extraction 0.95
+OKR  Objectives and Key Results       expansion  0.80
+MVP  (no expansion)                   candidate
 
 $ cat notes.md | ae -j
-{ "sentence": "...", "expansions": [...], "learned_candidates": [...], "unknown": [...] }
+{ "sentence": "...", "expansions": [...], "extractions": [...], "candidates": [...] }
 ```
 
 ## Why
@@ -69,6 +68,21 @@ The learned dictionary persists in a SQLite database — by default
 `$XDG_DATA_HOME/ae/acronyms.db` (else `~/.local/share/ae/acronyms.db`), or
 wherever `--db`/`$AE_DB` points. The daemon and the in-process fallback share it,
 so acronyms learned in one invocation are available to the next.
+
+### Managing the dictionary
+
+Subcommands curate the dictionary directly (no flags needed — they're distinct
+from analysis input, which arrives as a quoted argument or via stdin):
+
+```sh
+ae add MVP "Minimum Viable Product"   # add an entry
+ae list                               # list everything
+ae search perf                        # substring search over acronyms + expansions
+ae show KPI                           # expansions of one acronym
+ae rm MVP                             # remove an acronym (or `ae rm PT "Part Time"`)
+```
+
+All of these honor `-j`/`-J` too (`ae list -j`).
 
 Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. stdin (when
 piped) wins; otherwise the positional `TEXT` is used; with nothing to do, `ae`

@@ -7,7 +7,7 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 
 use crate::engine::Engine;
 use crate::{ipc, output};
@@ -15,6 +15,10 @@ use crate::{ipc, output};
 #[derive(Parser, Debug)]
 #[command(name = "ae", author, version, about = "Acronym Engine")]
 pub struct Cli {
+    /// Dictionary management subcommand. Omit to analyze text (the default).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Context text to scan. Optional when piping input via stdin.
     pub text: Option<String>,
 
@@ -27,11 +31,11 @@ pub struct Cli {
     pub stop: bool,
 
     /// JSON output: a pretty object (analysis) or `{"status": …}` (commands).
-    #[arg(short = 'j', long, conflicts_with = "ndjson")]
+    #[arg(short = 'j', long, global = true, conflicts_with = "ndjson")]
     pub json: bool,
 
     /// NDJSON output: one compact object per finding/line.
-    #[arg(short = 'J', long)]
+    #[arg(short = 'J', long, global = true)]
     pub ndjson: bool,
 
     /// Expand known acronyms only — don't extract or learn new ones (no writes).
@@ -53,7 +57,7 @@ pub struct Cli {
 
     /// Acronym dictionary database. Defaults to a per-user data dir
     /// (`$XDG_DATA_HOME/ae/acronyms.db`, else `~/.local/share/ae/acronyms.db`).
-    #[arg(long, env = "AE_DB")]
+    #[arg(long, env = "AE_DB", global = true)]
     pub db: Option<PathBuf>,
 
     /// Embedding model: a path (directory or `.onnx` file) or a name resolved
@@ -62,7 +66,7 @@ pub struct Cli {
     pub model: Option<String>,
 
     /// Emit engine telemetry to stderr.
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub verbose: bool,
 
     /// Internal: run as the Leader server process (spawned by `--daemon`).
@@ -97,11 +101,36 @@ pub enum Format {
     Ndjson,
 }
 
+/// Dictionary management commands. All honor `-j/-J` and operate on the `--db`
+/// dictionary directly (no model needed).
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// List every acronym and expansion.
+    List,
+    /// Show the expansions of one acronym.
+    Show { acronym: String },
+    /// Search acronyms and expansions by substring.
+    Search { query: String },
+    /// Add an acronym/expansion to the dictionary.
+    Add { acronym: String, expansion: String },
+    /// Remove an acronym (all expansions), or one specific expansion.
+    #[command(visible_alias = "delete")]
+    Rm {
+        acronym: String,
+        expansion: Option<String>,
+    },
+}
+
 /// Entry point — parse, set up logging, dispatch by role, render.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     init_logging(cli.verbose);
     let fmt = cli.format();
+
+    // Dictionary management runs against the DB directly and exits.
+    if let Some(command) = &cli.command {
+        return run_command(command, &cli, fmt);
+    }
 
     // Internal Leader process: serve until stopped, then exit.
     if cli.serve {
@@ -264,6 +293,81 @@ pub fn determine_input(cli: &Cli) -> Result<String, String> {
         Ok(text.clone())
     } else {
         Err("no input: pass text as an argument or pipe it via stdin".into())
+    }
+}
+
+/// Run a dictionary management command against the `--db` store.
+fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
+    let store = match crate::store::Store::open(&cli.db_path()) {
+        Ok(store) => {
+            let _ = store.seed_defaults();
+            store
+        }
+        Err(e) => return fail(fmt, &format!("could not open dictionary: {e}")),
+    };
+
+    match command {
+        Command::List => emit_entries(fmt, store.all_entries()),
+        Command::Search { query } => emit_entries(fmt, store.search(query)),
+        Command::Show { acronym } => {
+            let entries = store.expansions_for(acronym).map(|rows| {
+                rows.into_iter()
+                    .map(|(_, e)| (acronym.to_uppercase(), e))
+                    .collect()
+            });
+            emit_entries(fmt, entries)
+        }
+        Command::Add { acronym, expansion } => match store.add_entry(acronym, expansion) {
+            Ok(_) => {
+                let acronym = acronym.to_uppercase();
+                match fmt {
+                    Format::Human => println!("ae: added {acronym} → {expansion}"),
+                    _ => println!(
+                        "{}",
+                        serde_json::json!({"status": "added", "acronym": acronym, "expansion": expansion})
+                    ),
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(fmt, &format!("add failed: {e}")),
+        },
+        Command::Rm { acronym, expansion } => {
+            let deleted = match expansion {
+                Some(expansion) => store.delete_entry(acronym, expansion),
+                None => store.delete_acronym(acronym),
+            };
+            match deleted {
+                Ok(n) => {
+                    let acronym = acronym.to_uppercase();
+                    match fmt {
+                        Format::Human => {
+                            let noun = if n == 1 { "entry" } else { "entries" };
+                            println!("ae: removed {n} {noun} for {acronym}");
+                        }
+                        _ => println!(
+                            "{}",
+                            serde_json::json!({"status": "removed", "acronym": acronym, "removed": n})
+                        ),
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => fail(fmt, &format!("delete failed: {e}")),
+            }
+        }
+    }
+}
+
+/// Render a list of `(acronym, expansion)` entries, or report the error.
+fn emit_entries(fmt: Format, entries: rusqlite::Result<Vec<(String, String)>>) -> ExitCode {
+    match entries {
+        Ok(entries) => {
+            let stdout = io::stdout();
+            if let Err(e) = output::render_entries(&mut stdout.lock(), &entries, fmt) {
+                return fail(fmt, &format!("render failed: {e}"));
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(fmt, &format!("dictionary error: {e}")),
     }
 }
 

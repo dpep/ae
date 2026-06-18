@@ -73,7 +73,7 @@ fn json_output_parses_and_reports_learning() {
     assert!(out.success, "stderr: {}", out.stderr);
     let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert!(v["sentence"].is_string());
-    let learned = v["learned_candidates"].as_array().unwrap();
+    let learned = v["extractions"].as_array().unwrap();
     assert!(learned.iter().any(|c| c["acronym"] == "KPI"));
 }
 
@@ -93,7 +93,7 @@ fn learning_persists_across_invocations_via_shared_db() {
     let sock = scratch_socket("persist");
     // First pass teaches ZQ.
     let first = run(&sock, &[], Some("The ZQ (Zebra Queue) is deep."));
-    assert!(first.stdout.contains("learned"));
+    assert!(first.stdout.contains("extraction"));
     // Second pass — same socket → same DB — now expands it.
     let second = run(&sock, &["-j"], Some("Drain the ZQ now."));
     let v: serde_json::Value = serde_json::from_str(&second.stdout).unwrap();
@@ -139,7 +139,7 @@ fn read_only_expands_without_learning_or_persisting() {
             .iter()
             .any(|e| e["acronym"] == "OKR")
     );
-    assert!(v["learned_candidates"].as_array().unwrap().is_empty());
+    assert!(v["extractions"].as_array().unwrap().is_empty());
 
     // ...and nothing was persisted: a normal later pass still doesn't know ZQ.
     let second = run(&sock, &["-j"], Some("Drain the ZQ."));
@@ -231,12 +231,70 @@ fn unknown_acronyms_are_surfaced() {
     let out = run(&sock, &["-j"], Some("hi there MVP"));
     assert!(out.success, "stderr: {}", out.stderr);
     let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    let unknown = v["unknown"].as_array().unwrap();
+    let unknown = v["candidates"].as_array().unwrap();
     assert!(
         unknown.iter().any(|u| u == "MVP"),
         "MVP not surfaced: {}",
         out.stdout
     );
+}
+
+#[test]
+fn manage_add_list_search_show_then_remove() {
+    let sock = scratch_socket("manage");
+
+    assert!(run(&sock, &["add", "MVP", "Minimum Viable Product"], None).success);
+
+    let list = run(&sock, &["list", "-j"], None);
+    let rows: serde_json::Value = serde_json::from_str(&list.stdout).unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["acronym"] == "MVP")
+    );
+
+    let show = run(&sock, &["show", "MVP", "-j"], None);
+    let shown: serde_json::Value = serde_json::from_str(&show.stdout).unwrap();
+    assert!(
+        shown
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["expansion"] == "Minimum Viable Product")
+    );
+
+    let search = run(&sock, &["search", "viable", "-j"], None);
+    let found: serde_json::Value = serde_json::from_str(&search.stdout).unwrap();
+    assert!(
+        found
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["acronym"] == "MVP")
+    );
+
+    // An added acronym now expands and is no longer a candidate.
+    let analyze = run(&sock, &["-j"], Some("ship the MVP"));
+    let a: serde_json::Value = serde_json::from_str(&analyze.stdout).unwrap();
+    assert!(
+        a["expansions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["acronym"] == "MVP")
+    );
+    assert!(
+        !a["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "MVP")
+    );
+
+    let rm = run(&sock, &["rm", "MVP", "-j"], None);
+    let removed: serde_json::Value = serde_json::from_str(&rm.stdout).unwrap();
+    assert_eq!(removed["removed"], 1);
 }
 
 #[test]
