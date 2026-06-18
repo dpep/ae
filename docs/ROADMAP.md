@@ -128,14 +128,25 @@ commit.
       ranks them with confidence (share of the acronym's sightings). Defining an
       acronym clears its suggestions
 
+- [x] filler-tolerant mining — match the acronym as a subsequence over words,
+      skipping a closed set of fillers (OKR = Objectives *and* Key Results) yet
+      consuming one when it supplies a letter (POC = Point *of* Contact);
+      content words must contribute (precision guard)
+- [x] cross-text mining — watched candidates (len ≥ 3) are mined from later
+      inputs that never mention them, so definitions accrue over time
+- [x] context vectors in confidence — per-candidate running-mean context
+      embedding (`candidate_contexts`); each mined phrase records the coherence
+      of its context (`coh_sum`); `confidence` blends recurrence share with mean
+      coherence, damped for sparse counts
+
 ### Speculation — next steps
 
 - [ ] interactive `ae define <ACR>` — prompt with ranked suggestions, confirm → add
 - [ ] dedup near-identical expansions ("minimum viable product" ≈ "min viable
       product") via normalization/embedding similarity
-- [ ] subsequence mining (skip function words, e.g. OKR = Objectives *and* Key
-      Results) with a precision guard; optional cross-text mining for definitions
-      that never co-occur with the acronym
+- [ ] prune low-confidence speculative noise (short acronyms); `--min-confidence`
+- [ ] mine alternative expansions for *known* acronyms too (currently candidates
+      only)
 
 ## Feature requests / backlog
 

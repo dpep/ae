@@ -83,10 +83,13 @@ ae candidates                         # acronyms seen but undefined, by frequenc
 ae suggest MVP                        # speculative expansions mined from text
 ```
 
-`ae suggest` is the payoff of tracking candidates: when a candidate acronym
-appears in text, `ae` also scans that text for word-sequences whose initials
-spell it (no parentheses needed) and counts how often each recurs. Confidence is
-each phrase's share of the acronym's sightings:
+`ae suggest` is the payoff of tracking candidates. When `ae` analyzes text it
+mines word-sequences whose initials spell a watched candidate acronym — no
+parentheses needed, tolerant of skipped filler words (`OKR` = Objectives *and*
+Key Results), and across *subsequent* inputs too (a definition mentioned in a
+later sentence that never repeats the acronym still accrues). It counts how often
+each phrase recurs and how well its context fits where the acronym is used, then
+blends both into a confidence:
 
 ```
 $ ae suggest MVP
@@ -96,7 +99,8 @@ MVP   most valuable player      0.25 (1)
 ```
 
 Confirm one with `ae add MVP "Minimum Viable Product"` (which clears it from the
-candidate/suggestion lists).
+candidate/suggestion lists). It's heuristic — short acronyms attract noise, which
+sinks to the bottom on low confidence.
 
 Removal disambiguates when an acronym has several expansions:
 

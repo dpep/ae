@@ -360,13 +360,13 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
     }
 }
 
-/// Build and render speculative expansions with confidence (each expansion's
-/// share of its acronym's total sightings).
+/// Build and render speculative expansions, scoring confidence from both
+/// recurrence (stats) and context coherence (vectors).
 fn run_suggest(store: &crate::store::Store, fmt: Format, acronym: Option<&str>) -> ExitCode {
-    let raw = match acronym {
+    let raw: rusqlite::Result<Vec<(String, String, i64, f64)>> = match acronym {
         Some(acr) => store.potentials_for(acr).map(|v| {
             v.into_iter()
-                .map(|(exp, n)| (acr.to_uppercase(), exp, n))
+                .map(|(exp, n, coh)| (acr.to_uppercase(), exp, n, coh))
                 .collect()
         }),
         None => store.all_potentials(),
@@ -376,16 +376,20 @@ fn run_suggest(store: &crate::store::Store, fmt: Format, acronym: Option<&str>) 
         Err(e) => return fail(fmt, &format!("dictionary error: {e}")),
     };
 
-    // Confidence = an expansion's share of its acronym's total sightings.
+    // Per-acronym totals give each expansion's share of the sightings.
     let mut totals: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
-    for (acr, _, n) in &rows {
+    for (acr, _, n, _) in &rows {
         *totals.entry(acr.as_str()).or_insert(0) += n;
     }
     let scored: Vec<(String, String, i64, f32)> = rows
         .iter()
-        .map(|(acr, exp, n)| {
-            let total = totals[acr.as_str()].max(1);
-            (acr.clone(), exp.clone(), *n, *n as f32 / total as f32)
+        .map(|(acr, exp, n, coh_sum)| {
+            (
+                acr.clone(),
+                exp.clone(),
+                *n,
+                confidence(*n, *coh_sum, totals[acr.as_str()]),
+            )
         })
         .collect();
 
@@ -394,6 +398,17 @@ fn run_suggest(store: &crate::store::Store, fmt: Format, acronym: Option<&str>) 
         return fail(fmt, &format!("render failed: {e}"));
     }
     ExitCode::SUCCESS
+}
+
+/// Blend recurrence and coherence into a `[0, 1]` confidence: `share` (this
+/// expansion's fraction of the acronym's sightings) and `mean_coh` (average
+/// context coherence) weighted equally, then damped so a lone sighting can't
+/// reach certainty.
+fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
+    let count = count.max(1) as f32;
+    let share = count / total.max(1) as f32;
+    let mean_coh = (coh_sum as f32 / count).clamp(0.0, 1.0);
+    ((0.5 * share + 0.5 * mean_coh) * (count / (count + 1.0))).clamp(0.0, 1.0)
 }
 
 /// Resolve and execute a removal, disambiguating among multiple expansions.
@@ -539,4 +554,19 @@ fn fail(fmt: Format, msg: &str) -> ExitCode {
         _ => eprintln!("{}", serde_json::json!({ "error": msg })),
     }
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confidence;
+
+    #[test]
+    fn confidence_rewards_recurrence_and_coherence() {
+        // Dominant, recurring, on-topic expansion vs a lone off-topic match.
+        let strong = confidence(4, 4.0, 5); // share 0.8, coherence 1.0
+        let weak = confidence(1, 0.1, 5); // share 0.2, coherence 0.1
+        assert!(strong > weak);
+        assert!((0.0..=1.0).contains(&strong));
+        assert!((0.0..=1.0).contains(&weak));
+    }
 }

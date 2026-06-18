@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 
 use crate::mrl::MRL_DIMS;
 
@@ -43,14 +43,25 @@ CREATE TABLE IF NOT EXISTS candidate_acronyms (
 );
 
 -- Speculative expansions for candidates: phrases whose word-initials spell the
--- acronym, mined from text that mentions it. Recurrence drives confidence.
+-- acronym, mined from text that mentions it (or, later, that doesn't).
+-- `count` is recurrence (stats); `coh_sum` accumulates the vector coherence of
+-- the contexts they were mined from. Together they drive confidence.
 CREATE TABLE IF NOT EXISTS potential_expansions (
     acronym TEXT NOT NULL,
     expansion TEXT NOT NULL,
     count INTEGER NOT NULL DEFAULT 1,
+    coh_sum REAL NOT NULL DEFAULT 0,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (acronym, expansion)
+);
+
+-- Running-mean context embedding per candidate acronym: where it tends to be
+-- used, so we can judge whether a mined phrase's context fits.
+CREATE TABLE IF NOT EXISTS candidate_contexts (
+    acronym TEXT PRIMARY KEY,
+    mean BLOB NOT NULL,
+    n INTEGER NOT NULL DEFAULT 0
 );
 ";
 
@@ -89,6 +100,12 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        // Migration for DBs created before coherence tracking (ignore the
+        // "duplicate column" error on fresh DBs that already have it).
+        let _ = conn.execute(
+            "ALTER TABLE potential_expansions ADD COLUMN coh_sum REAL NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(Self { conn })
     }
 
@@ -146,47 +163,104 @@ impl Store {
             "DELETE FROM potential_expansions WHERE acronym = ?1",
             params![acronym],
         )?;
+        self.conn.execute(
+            "DELETE FROM candidate_contexts WHERE acronym = ?1",
+            params![acronym],
+        )?;
         Ok(())
     }
 
-    /// Record one sighting of a speculative expansion for a candidate acronym.
-    pub fn record_potential(&self, acronym: &str, expansion: &str) -> Result<()> {
+    /// Record one sighting of a speculative expansion, with the vector coherence
+    /// of the context it was mined from (accumulated into `coh_sum`).
+    pub fn record_potential(&self, acronym: &str, expansion: &str, coherence: f32) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim().to_lowercase();
         if acronym.is_empty() || expansion.is_empty() {
             return Ok(());
         }
         self.conn.execute(
-            "INSERT INTO potential_expansions (acronym, expansion, count) VALUES (?1, ?2, 1)
-             ON CONFLICT(acronym, expansion) DO UPDATE SET count = count + 1, last_seen = CURRENT_TIMESTAMP",
-            params![acronym, expansion],
+            "INSERT INTO potential_expansions (acronym, expansion, count, coh_sum)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(acronym, expansion) DO UPDATE
+               SET count = count + 1, coh_sum = coh_sum + ?3, last_seen = CURRENT_TIMESTAMP",
+            params![acronym, expansion, coherence as f64],
         )?;
         Ok(())
     }
 
-    /// Speculative `(expansion, count)` pairs for one acronym, most-seen first.
-    pub fn potentials_for(&self, acronym: &str) -> Result<Vec<(String, i64)>> {
+    /// Speculative `(expansion, count, coh_sum)` rows for one acronym.
+    pub fn potentials_for(&self, acronym: &str) -> Result<Vec<(String, i64, f64)>> {
         let acronym = acronym.trim().to_uppercase();
         let mut stmt = self.conn.prepare(
-            "SELECT expansion, count FROM potential_expansions
+            "SELECT expansion, count, coh_sum FROM potential_expansions
              WHERE acronym = ?1 ORDER BY count DESC, expansion",
         )?;
         let rows = stmt
-            .query_map(params![acronym], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map(params![acronym], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// All speculative `(acronym, expansion, count)` triples, for `suggest`.
-    pub fn all_potentials(&self) -> Result<Vec<(String, String, i64)>> {
+    /// All speculative `(acronym, expansion, count, coh_sum)` rows, for `suggest`.
+    pub fn all_potentials(&self) -> Result<Vec<(String, String, i64, f64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT acronym, expansion, count FROM potential_expansions
+            "SELECT acronym, expansion, count, coh_sum FROM potential_expansions
              ORDER BY acronym, count DESC, expansion",
         )?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The running-mean context embedding for a candidate acronym, if any.
+    pub fn candidate_context_mean(&self, acronym: &str) -> Result<Option<Vec<f32>>> {
+        let acronym = acronym.trim().to_uppercase();
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT mean FROM candidate_contexts WHERE acronym = ?1",
+                params![acronym],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(blob.map(|b| decode(&b)))
+    }
+
+    /// Fold one context vector into a candidate acronym's running mean.
+    pub fn update_candidate_context(&self, acronym: &str, vector: &[f32]) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
+        let current: Option<(Vec<u8>, i64)> = self
+            .conn
+            .query_row(
+                "SELECT mean, n FROM candidate_contexts WHERE acronym = ?1",
+                params![acronym],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let (mean, n) = match current {
+            Some((blob, n)) => {
+                let mut mean = decode(&blob);
+                let n = n as f32;
+                // Incremental mean: mean += (x - mean) / (n + 1).
+                for (m, &x) in mean.iter_mut().zip(vector) {
+                    *m += (x - *m) / (n + 1.0);
+                }
+                (mean, n as i64 + 1)
+            }
+            None => (vector.to_vec(), 1),
+        };
+        self.conn.execute(
+            "INSERT INTO candidate_contexts (acronym, mean, n) VALUES (?1, ?2, ?3)
+             ON CONFLICT(acronym) DO UPDATE SET mean = ?2, n = ?3",
+            params![acronym, encode(&mean), n],
+        )?;
+        Ok(())
     }
 
     /// Seed the built-in dictionary if the table is empty. Returns the number of

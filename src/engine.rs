@@ -63,15 +63,9 @@ impl Engine {
         let learned = self.learn_and_persist(text)?;
         let candidates = candidate_acronyms(text, &expansions, &learned);
 
-        // Track how often we see undefined acronyms, and mine the text for
-        // speculative expansions (phrases whose initials spell them). Analysis
-        // only — read-only leaves no trace.
-        for candidate in &candidates {
-            self.store.record_candidate(candidate)?;
-            for phrase in mine_potentials(text, candidate) {
-                self.store.record_potential(candidate, &phrase)?;
-            }
-        }
+        // Stage 3: candidate tracking + speculative expansion mining (analysis
+        // only — read-only leaves no trace).
+        self.mine(text, &query_vec, &candidates)?;
 
         Ok(AnalysisPayload {
             sentence: text.to_string(),
@@ -178,36 +172,103 @@ impl Engine {
 
     /// Speculative expansions mined for `acronym`, with occurrence counts.
     pub fn potentials_for(&self, acronym: &str) -> rusqlite::Result<Vec<(String, i64)>> {
-        self.store.potentials_for(acronym)
+        Ok(self
+            .store
+            .potentials_for(acronym)?
+            .into_iter()
+            .map(|(expansion, count, _coh)| (expansion, count))
+            .collect())
+    }
+
+    /// Record candidates, mine speculative expansions (same-text and, for other
+    /// watched candidates, cross-text), and accumulate vector coherence.
+    fn mine(&self, text: &str, query_vec: &[f32], candidates: &[String]) -> rusqlite::Result<()> {
+        let present: std::collections::HashSet<String> =
+            candidates.iter().map(|c| c.to_uppercase()).collect();
+
+        // Candidates mentioned in this text: count them, mine here, and fold
+        // this text into the acronym's context (where it tends to appear).
+        for acronym in candidates {
+            self.store.record_candidate(acronym)?;
+            let coherence = self.context_coherence(acronym, query_vec)?;
+            for phrase in mine_potentials(text, acronym) {
+                self.store.record_potential(acronym, &phrase, coherence)?;
+            }
+            self.store.update_candidate_context(acronym, query_vec)?;
+        }
+
+        // Cross-text lookout: scan this text for *other* watched candidates'
+        // expansions, scored by how well the text fits their usual context.
+        // (Length ≥ 3 to limit the noise short acronyms invite.)
+        for (acronym, _) in self.store.candidates()? {
+            if present.contains(&acronym) || acronym.chars().count() < 3 {
+                continue;
+            }
+            let coherence = self.context_coherence(&acronym, query_vec)?;
+            for phrase in mine_potentials(text, &acronym) {
+                self.store.record_potential(&acronym, &phrase, coherence)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Cosine of this text's embedding against where `acronym` usually appears
+    /// (`1.0` when we have no history yet — neutral, don't penalize).
+    fn context_coherence(&self, acronym: &str, query_vec: &[f32]) -> rusqlite::Result<f32> {
+        Ok(match self.store.candidate_context_mean(acronym)? {
+            Some(mean) => cosine_similarity(query_vec, &mean).clamp(0.0, 1.0),
+            None => 1.0,
+        })
     }
 }
 
+/// Short function words an acronym may omit (e.g. OKR = Objectives *and* Key
+/// Results). A filler is *skipped* when it doesn't help, but still *consumed*
+/// when its initial does match the next letter (e.g. POC = Point *of* Contact).
+const FILLER: &[&str] = &[
+    "a", "an", "and", "the", "of", "for", "to", "in", "on", "at", "by", "with", "or", "as", "per",
+];
+
+fn is_filler(word: &str) -> bool {
+    FILLER.contains(&word.to_lowercase().as_str())
+}
+
 /// Mine `text` for phrases whose word-initials spell `acronym` — speculative
-/// expansions casually mentioned in the same text (no parens required). Uses a
-/// strict window of consecutive words (precise; misses skipped function words),
-/// de-duplicated within the text.
+/// expansions casually mentioned (no parens required). Matches the acronym as a
+/// subsequence over words, tolerating skipped filler words, but every *content*
+/// word must contribute a letter (the precision guard) and the phrase is
+/// anchored at content words on both ends. De-duplicated within the text.
 fn mine_potentials(text: &str, acronym: &str) -> Vec<String> {
     let target: Vec<char> = acronym.chars().map(|c| c.to_ascii_uppercase()).collect();
-    let len = target.len();
-
-    // Words trimmed of edge punctuation; drop any that are left empty.
     let words: Vec<&str> = text
         .split_whitespace()
         .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .filter(|w| !w.is_empty())
         .collect();
-    if words.len() < len {
+    if words.len() < target.len() {
         return Vec::new();
     }
+    let initial = |w: &str| w.chars().next().unwrap().to_ascii_uppercase();
+    let max_span = target.len() * 2 + 2; // bound how many fillers we'll skip
 
     let mut found = Vec::new();
-    for window in words.windows(len) {
-        let initials: Vec<char> = window
-            .iter()
-            .map(|w| w.chars().next().unwrap().to_ascii_uppercase())
-            .collect();
-        if initials == target {
-            let phrase = window.join(" ").to_lowercase();
+    for i in 0..words.len() {
+        // Anchor on a content word that opens the acronym.
+        if is_filler(words[i]) || initial(words[i]) != target[0] {
+            continue;
+        }
+        let (mut t, mut last, mut j) = (1usize, i, i + 1);
+        while j < words.len() && t < target.len() && j - i < max_span {
+            if initial(words[j]) == target[t] {
+                t += 1;
+                last = j;
+            } else if !is_filler(words[j]) {
+                break; // a content word that doesn't fit ends the window
+            }
+            j += 1;
+        }
+        if t == target.len() {
+            let phrase = words[i..=last].join(" ").to_lowercase();
             if !found.contains(&phrase) {
                 found.push(phrase);
             }
@@ -409,6 +470,38 @@ mod tests {
             .find(|(p, _)| p == "minimum viable product")
             .map(|(_, c)| *c);
         assert_eq!(count, Some(2));
+    }
+
+    #[test]
+    fn mining_skips_a_filler_word_that_is_not_in_the_acronym() {
+        let e = Engine::in_memory().unwrap();
+        // PBJ skips "and": Peanut Butter (and) Jelly.
+        e.analyze("a classic PBJ is peanut butter and jelly")
+            .unwrap();
+        let pots = e.potentials_for("PBJ").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "peanut butter and jelly"));
+    }
+
+    #[test]
+    fn mining_consumes_a_filler_word_that_supplies_a_letter() {
+        let e = Engine::in_memory().unwrap();
+        // POC uses the "of": Point Of Contact.
+        e.analyze("our POC is the point of contact for vendors")
+            .unwrap();
+        let pots = e.potentials_for("POC").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "point of contact"));
+    }
+
+    #[test]
+    fn cross_text_mining_finds_a_definition_without_the_acronym() {
+        let e = Engine::in_memory().unwrap();
+        // MVP becomes a watched candidate here...
+        e.analyze("the MVP ships next week").unwrap();
+        // ...and is mined from a later text that never mentions it.
+        e.analyze("we scoped a minimum viable product for launch")
+            .unwrap();
+        let pots = e.potentials_for("MVP").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
     }
 
     #[test]
