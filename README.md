@@ -3,19 +3,23 @@
 Ultra-lightweight, local-first acronym expansion and definition extraction for
 the command line and for LLM processes that need real-time jargon resolution.
 
-Feed it text; it does two things at once:
+Feed it text; it does three things at once:
 
 1. **Expansion** — finds known acronyms and returns their expansions, ranked.
 2. **Learning** — spots acronyms *defined inline* (`KPI (Key Performance
    Indicator)`) and extracts the new term so the dictionary grows as it reads.
+3. **Unknown detection** — flags acronym-shaped tokens it doesn't recognize and
+   that aren't defined inline (e.g. `MVP` in "ship the MVP"), so you know it saw
+   them and can define them.
 
 ```sh
-$ ae "Our KPI (Key Performance Indicator) gates the OKR review."
-KPI  Key Performance Indicator        (learned, 0.95)
-OKR  Objectives and Key Results       (expansion, 0.80)
+$ ae "Our KPI (Key Performance Indicator) gates the OKR review, then the MVP."
+KPI  Key Performance Indicator        learned   0.95
+OKR  Objectives and Key Results       expansion 0.80
+MVP  (no expansion)                   unknown
 
-$ cat notes.md | ae --format json
-{ "sentence": "...", "expansions": [...], "learned_candidates": [...] }
+$ cat notes.md | ae -j
+{ "sentence": "...", "expansions": [...], "learned_candidates": [...], "unknown": [...] }
 ```
 
 ## Why

@@ -102,6 +102,12 @@ commit.
 - [x] `--file` (`-f`) — read a file, implies batch
 - [x] bare invocation (no input, interactive) prints `--help`
 
+## Evaluation
+
+- [x] unknown-acronym detection — acronym-shaped tokens (`[A-Z][A-Z0-9]{1,5}`)
+      that are neither expanded nor learned are surfaced in `payload.unknown`
+      (and as `kind:"unknown"` hits in batch)
+
 ## Feature requests / backlog
 
 - [ ] `vec0` virtual-table storage when `sqlite-vec` is available.

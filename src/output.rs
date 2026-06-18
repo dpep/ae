@@ -43,6 +43,9 @@ fn render_human(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Res
             c.acronym, c.extracted_definition, c.confidence
         )?;
     }
+    for acronym in &payload.unknown {
+        writeln!(out, "{:<8} {:<40} unknown", acronym, "(no expansion)")?;
+    }
     Ok(())
 }
 
@@ -60,8 +63,10 @@ struct Hit {
     line: usize,
     col: usize,
     acronym: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     expansion: String,
-    confidence: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pattern_type: Option<String>,
 }
@@ -79,10 +84,16 @@ pub fn render_lines(
                 return writeln!(out, "No acronyms found.");
             }
             for h in &hits {
+                let conf = h.confidence.map(|c| format!("{c:.2}")).unwrap_or_default();
+                let expansion = if h.expansion.is_empty() {
+                    "(no expansion)"
+                } else {
+                    &h.expansion
+                };
                 writeln!(
                     out,
-                    "{}:{}: {:<8} {:<40} {} {:.2}",
-                    h.line, h.col, h.acronym, h.expansion, h.kind, h.confidence
+                    "{}:{}: {:<8} {:<40} {:<9} {}",
+                    h.line, h.col, h.acronym, expansion, h.kind, conf
                 )?;
             }
         }
@@ -108,7 +119,7 @@ fn build_hits(results: &[LineResult]) -> Vec<Hit> {
                     col,
                     acronym: e.acronym.clone(),
                     expansion: m.expansion.clone(),
-                    confidence: m.confidence,
+                    confidence: Some(m.confidence),
                     pattern_type: None,
                 });
             }
@@ -120,8 +131,19 @@ fn build_hits(results: &[LineResult]) -> Vec<Hit> {
                 col: col_of(&r.text, &c.acronym),
                 acronym: c.acronym.clone(),
                 expansion: c.extracted_definition.clone(),
-                confidence: c.confidence,
+                confidence: Some(c.confidence),
                 pattern_type: Some(c.pattern_type.clone()),
+            });
+        }
+        for acronym in &r.payload.unknown {
+            hits.push(Hit {
+                kind: "unknown",
+                line: r.line,
+                col: col_of(&r.text, acronym),
+                acronym: acronym.clone(),
+                expansion: String::new(),
+                confidence: None,
+                pattern_type: None,
             });
         }
     }
@@ -159,6 +181,10 @@ fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Re
         });
         writeln!(out, "{line}")?;
     }
+    for acronym in &payload.unknown {
+        let line = json!({ "kind": "unknown", "acronym": acronym });
+        writeln!(out, "{line}")?;
+    }
     Ok(())
 }
 
@@ -184,6 +210,7 @@ mod tests {
                 pattern_type: "alpha".into(),
                 confidence: 0.95,
             }],
+            unknown: vec!["MVP".into()],
         }
     }
 
@@ -194,11 +221,12 @@ mod tests {
     }
 
     #[test]
-    fn human_mentions_both_stages() {
+    fn human_mentions_each_category() {
         let s = rendered(Format::Human);
         assert!(s.contains("expansion"));
         assert!(s.contains("learned"));
         assert!(s.contains("Key Performance Indicator"));
+        assert!(s.contains("unknown") && s.contains("MVP"));
     }
 
     #[test]
@@ -212,7 +240,7 @@ mod tests {
     fn ndjson_is_one_object_per_line() {
         let s = rendered(Format::Ndjson);
         let lines: Vec<&str> = s.lines().collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 3); // expansion + learned + unknown
         for line in lines {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             assert!(v.get("kind").is_some());

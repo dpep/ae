@@ -61,24 +61,28 @@ impl Engine {
 
         let expansions = self.expand(text, &query_vec)?;
         let learned = self.learn_and_persist(text)?;
+        let unknown = unknown_candidates(text, &expansions, &learned);
 
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
             learned_candidates: learned,
+            unknown,
         })
     }
 
-    /// Read-only Stage 1 only: expand known acronyms without extracting or
-    /// persisting anything. The dictionary is never written, so this is safe to
-    /// run against a shared DB without side effects.
+    /// Read-only Stage 1 only: expand known acronyms (and flag unknown ones)
+    /// without extracting or persisting anything. The dictionary is never
+    /// written, so this is safe to run against a shared DB without side effects.
     pub fn expand_only(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
         let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
         let expansions = self.expand(text, &query_vec)?;
+        let unknown = unknown_candidates(text, &expansions, &[]);
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
             learned_candidates: Vec::new(),
+            unknown,
         })
     }
 
@@ -165,6 +169,54 @@ fn tokens(text: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty())
 }
 
+/// Acronym-shaped tokens in `text` that were neither expanded nor learned —
+/// distinct, in order of first appearance. These are acronyms `ae` *saw* but
+/// can't resolve, surfaced so the user can define them.
+fn unknown_candidates(
+    text: &str,
+    expansions: &[ExpansionResult],
+    learned: &[LearnedCandidate],
+) -> Vec<String> {
+    let mut resolved: std::collections::HashSet<String> =
+        expansions.iter().map(|e| e.acronym.clone()).collect();
+    resolved.extend(learned.iter().map(|c| c.acronym.to_uppercase()));
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for token in tokens(text) {
+        if !is_acronym_shaped(token) {
+            continue;
+        }
+        let upper = token.to_uppercase();
+        if !resolved.contains(&upper) && seen.insert(upper) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
+/// Heuristic acronym shape: 2–6 chars, all uppercase letters or digits, at
+/// least one letter, and not starting with a digit (e.g. `MVP`, `S3`, `B2B`).
+fn is_acronym_shaped(token: &str) -> bool {
+    let len = token.chars().count();
+    if !(2..=6).contains(&len) {
+        return false;
+    }
+    let mut has_letter = false;
+    for (i, c) in token.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            has_letter = true;
+        } else if c.is_ascii_digit() {
+            if i == 0 {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+    has_letter
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +292,36 @@ mod tests {
         // Nothing was persisted: a later pass still doesn't know ZQ.
         let again = e.expand_only("Drain the ZQ now.").unwrap();
         assert!(!again.expansions.iter().any(|r| r.acronym == "ZQ"));
+    }
+
+    #[test]
+    fn flags_an_unknown_acronym_shaped_token() {
+        let e = Engine::in_memory().unwrap();
+        let out = e.analyze("hi there MVP and OKR").unwrap();
+        // MVP is acronym-shaped but unknown and undefined → flagged.
+        assert!(out.unknown.contains(&"MVP".to_string()));
+        // OKR is seeded → expanded, not flagged as unknown.
+        assert!(out.expansions.iter().any(|r| r.acronym == "OKR"));
+        assert!(!out.unknown.contains(&"OKR".to_string()));
+    }
+
+    #[test]
+    fn an_inline_defined_acronym_is_learned_not_unknown() {
+        let e = Engine::in_memory().unwrap();
+        let out = e.analyze("see the PDP (Product Detail Page)").unwrap();
+        assert!(out.learned_candidates.iter().any(|c| c.acronym == "PDP"));
+        assert!(!out.unknown.contains(&"PDP".to_string()));
+    }
+
+    #[test]
+    fn ordinary_lowercase_words_are_not_acronym_candidates() {
+        let e = Engine::in_memory().unwrap();
+        assert!(
+            e.analyze("the cat sat on a mat")
+                .unwrap()
+                .unknown
+                .is_empty()
+        );
     }
 
     #[test]

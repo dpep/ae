@@ -40,6 +40,10 @@ pub struct AnalysisPayload {
     pub sentence: String,
     pub expansions: Vec<ExpansionResult>,
     pub learned_candidates: Vec<LearnedCandidate>,
+    /// Acronym-shaped tokens that were neither expanded (unknown to the
+    /// dictionary) nor defined inline — surfaced so callers know they were seen.
+    #[serde(default)]
+    pub unknown: Vec<String>,
 }
 
 impl AnalysisPayload {
@@ -49,11 +53,12 @@ impl AnalysisPayload {
             sentence: sentence.into(),
             expansions: Vec::new(),
             learned_candidates: Vec::new(),
+            unknown: Vec::new(),
         }
     }
 
-    /// True when nothing was expanded and nothing was learned.
+    /// True when nothing was expanded, learned, or seen as an unknown acronym.
     pub fn is_empty(&self) -> bool {
-        self.expansions.is_empty() && self.learned_candidates.is_empty()
+        self.expansions.is_empty() && self.learned_candidates.is_empty() && self.unknown.is_empty()
     }
 }

@@ -226,6 +226,20 @@ fn batch_human_output_is_grep_style() {
 }
 
 #[test]
+fn unknown_acronyms_are_surfaced() {
+    let sock = scratch_socket("unknown");
+    let out = run(&sock, &["-j"], Some("hi there MVP"));
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let unknown = v["unknown"].as_array().unwrap();
+    assert!(
+        unknown.iter().any(|u| u == "MVP"),
+        "MVP not surfaced: {}",
+        out.stdout
+    );
+}
+
+#[test]
 fn plain_text_reports_no_findings() {
     let sock = scratch_socket("plain");
     let out = run(&sock, &[], Some("just an ordinary lowercase sentence"));
