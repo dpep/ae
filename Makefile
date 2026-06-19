@@ -2,8 +2,9 @@
 #
 #   make            - same as `make help`
 #   make build      - dev build (external model)   → ./target/debug/ae
-#   make release    - optimized, model bundled in  → ./target/release/ae
-#   make install    - cargo install --path . (bundled, → ~/.cargo/bin)
+#   make release    - optimized, external model    → ./target/release/ae
+#   make bundle     - optimized, model baked in (one self-contained file)
+#   make install    - cargo install --path . (external model, → ~/.cargo/bin)
 #   make uninstall  - cargo uninstall ae
 #   make test       - cargo test (external model — fast, small test binaries)
 #   make model      - fetch + cache the embedding model (no build)
@@ -12,9 +13,10 @@
 #   make clean      - cargo clean
 #
 # The embedding model is fetched at build time into a user cache (~/.cache/ae)
-# and reused across rebuilds — never committed. Release/install builds bundle it
-# into a single self-contained binary; dev/test builds load it externally from
-# the cache (smaller binaries, faster compiles) via --no-default-features.
+# and reused across rebuilds — never committed. Everything loads it externally
+# from that cache (smaller, faster); `make bundle` is the special case that bakes
+# it into a single self-contained binary for standalone distribution. All
+# release-profile builds strip symbols/debug info (see [profile.release]).
 #
 # Note: this machine's cargo came via Homebrew's keg-only rustup and may not be
 # on PATH. Either add it (see CLAUDE.md) or run, e.g.:
@@ -27,13 +29,14 @@ BIN   := ae
 DEV   := --no-default-features --features ort-download
 
 .DEFAULT_GOAL := help
-.PHONY: help build release install uninstall test model lint fmt clean
+.PHONY: help build release bundle install uninstall test model lint fmt clean
 
 help:
 	@echo "ae targets:"
 	@echo "  make build      dev build (external model) → target/debug/$(BIN)"
-	@echo "  make release    optimized, model bundled in → target/release/$(BIN)"
-	@echo "  make install    cargo install --path . (bundled, → ~/.cargo/bin)"
+	@echo "  make release    optimized, external model → target/release/$(BIN)"
+	@echo "  make bundle     optimized, model baked in (self-contained file)"
+	@echo "  make install    cargo install --path . (external model, → ~/.cargo/bin)"
 	@echo "  make uninstall  cargo uninstall $(BIN)"
 	@echo "  make test       cargo test (external model)"
 	@echo "  make model      fetch + cache the embedding model"
@@ -45,10 +48,14 @@ build:
 	$(CARGO) build $(DEV)
 
 release:
+	$(CARGO) build --release
+
+# Special case: bake the model into one self-contained binary for distribution.
+bundle:
 	$(CARGO) build --release --features bundled-model
 
 install:
-	$(CARGO) install --path . --features bundled-model
+	$(CARGO) install --path .
 
 uninstall:
 	$(CARGO) uninstall $(BIN)

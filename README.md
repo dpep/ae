@@ -40,17 +40,17 @@ cleans itself up.
 ## Install
 
 ```sh
-make install                            # → ~/.cargo/bin/ae  (one self-contained binary)
-# or, for a standalone binary:
-cargo build --release --features bundled-model   # → target/release/ae
+make install   # → ~/.cargo/bin/ae
+make bundle    # standalone: model baked into one self-contained file
 ```
 
 The embedding model is fetched once at build time into a user cache (`~/.cache/ae`,
-reused across rebuilds — never committed). The default loads it **externally**
-from that cache (smaller, faster compiles — the iteration-friendly default); add
-`--features bundled-model` (what `make install` / `make release` do) to **bake it
-into the binary** so `ae` ships as a single self-contained file. Offline builds
-still work — they fall back to a deterministic hash embedder.
+reused across rebuilds — never committed). Everything loads it **externally** from
+that cache by default (smaller, faster compiles — and how `ae` ships via
+Homebrew). `make bundle` (or `--features bundled-model`) is the special case that
+**bakes it into the binary** for a single self-contained file you can hand to
+another machine. Offline builds still work — they fall back to a deterministic
+hash embedder.
 
 ## Usage
 
