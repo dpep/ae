@@ -213,8 +213,14 @@ candidate).
       handles same-length phrases today)
 - [x] age-based grace in GC (`last_seen`) — recent mined rows spared from the
       low-confidence drop; dedup preserves the newest timestamp
-- [ ] mine alternative expansions for *known* acronyms too (currently candidates
-      only)
+- [x] mine *known* acronyms too — alternative meanings become speculative rows;
+      a recurrence of a known expansion folds its context in (strengthening
+      contextual confidence) instead of duplicating. A content-word **initials
+      filter** skips acronyms this text can't supply, so the larger mineable set
+      stays cheap per analysis
+- [ ] trie-based single-pass mining — walk the text once over a trie of mineable
+      acronyms (vs the per-acronym scan); the initials filter is the cheap
+      interim win
 - [ ] fzf preview pane showing where each candidate/phrase was seen
 
 ## Feature requests / backlog

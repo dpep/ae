@@ -265,16 +265,38 @@ impl Engine {
             self.store.update_candidate_context(acronym, query_vec)?;
         }
 
-        // Cross-text lookout: scan this text for the expansions of *other*
-        // watch-list acronyms — declared, or seen often enough to be promoted
-        // from noise to mining (length ≥ 3 limits short-acronym noise).
-        for acronym in self.store.watch_list(WATCH_THRESHOLD)? {
-            if present.contains(&acronym) || acronym.chars().count() < 3 {
+        // Scan this text for the expansions of the broader set we always keep an
+        // eye on: watch-list candidates (declared / seen often) AND *known*
+        // acronyms — to catch alternative meanings and recurrences. The initials
+        // filter skips, without scanning, any acronym whose letters this text
+        // can't supply, so the set staying large doesn't cost much per analysis.
+        let initials = content_initials(text);
+        let mut mineable: std::collections::HashSet<String> = self
+            .store
+            .watch_list(WATCH_THRESHOLD)?
+            .into_iter()
+            .collect();
+        mineable.extend(self.store.all_acronyms()?);
+        for acronym in mineable {
+            if present.contains(&acronym)
+                || acronym.chars().count() < 3
+                || !letters_present(&acronym, &initials)
+            {
                 continue;
             }
+            let confirmed = self.store.expansions_for(&acronym)?;
             let coherence = self.context_coherence(&acronym, query_vec)?;
             for phrase in mine_potentials(text, &acronym) {
-                self.store.record_potential(&acronym, &phrase, coherence)?;
+                match confirmed
+                    .iter()
+                    .find(|(_, e, _)| e.to_lowercase() == phrase)
+                {
+                    // A recurrence of a known expansion → fold this context in,
+                    // which strengthens its contextual-confidence signal.
+                    Some((id, _, _)) => self.store.add_context(*id, query_vec)?,
+                    // A new (or already-speculative) alternative meaning.
+                    None => self.store.record_potential(&acronym, &phrase, coherence)?,
+                }
             }
         }
         Ok(())
@@ -299,6 +321,28 @@ const FILLER: &[&str] = &[
 
 fn is_filler(word: &str) -> bool {
     FILLER.contains(&word.to_lowercase().as_str())
+}
+
+/// Uppercase initials of the content (non-filler) words in `text` — the only
+/// letters a mined expansion can supply, since each acronym letter comes from a
+/// content word's initial.
+fn content_initials(text: &str) -> std::collections::HashSet<char> {
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty() && !is_filler(w))
+        .filter_map(|w| w.chars().next())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// Cheap necessary condition for [`mine_potentials`] to find anything: every
+/// letter of `acronym` must appear among the text's content-word `initials`.
+/// Lets us skip most acronyms without scanning the text for each.
+fn letters_present(acronym: &str, initials: &std::collections::HashSet<char>) -> bool {
+    acronym
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .all(|c| initials.contains(&c.to_ascii_uppercase()))
 }
 
 /// Mine `text` for phrases whose word-initials spell `acronym` — speculative
@@ -660,6 +704,29 @@ mod tests {
         // ...and with no grace it's dropped.
         e.consolidate(0.9, 0).unwrap();
         assert!(e.potentials_for("MVP").unwrap().is_empty());
+    }
+
+    #[test]
+    fn known_acronyms_mine_alternative_expansions() {
+        let e = Engine::in_memory().unwrap();
+        // KPI is a known default ("Key Performance Indicator"). A text whose
+        // initials spell KPI with a *different* phrase mines an alternative.
+        e.analyze("the kangaroo population index rose").unwrap();
+        let pots = e.potentials_for("KPI").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "kangaroo population index"));
+    }
+
+    #[test]
+    fn known_expansion_recurrence_is_not_a_duplicate_suggestion() {
+        let e = Engine::in_memory().unwrap();
+        // Restating OKR's known expansion shouldn't add it as a speculative row.
+        e.analyze("our objectives and key results review").unwrap();
+        assert!(
+            e.potentials_for("OKR")
+                .unwrap()
+                .iter()
+                .all(|(p, _)| p != "objectives and key results")
+        );
     }
 
     #[test]

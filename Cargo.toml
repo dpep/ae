@@ -44,3 +44,11 @@ ort-download = [
   "ort/download-binaries", "ort/tls-native", "ort/copy-dylibs", "ort/api-24",
 ]
 ort-load-dynamic = ["ort/std", "ort/ndarray", "ort/tracing", "ort/load-dynamic", "ort/api-24"]
+
+# Release builds (Homebrew, CI `--release`) optimize for a small single binary:
+# strip symbols/debug info and let LTO + one codegen unit drop dead code. The
+# bundled model still dominates size, but this trims the code/runtime bloat.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
