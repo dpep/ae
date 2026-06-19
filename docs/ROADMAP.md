@@ -215,12 +215,13 @@ candidate).
       low-confidence drop; dedup preserves the newest timestamp
 - [x] mine *known* acronyms too — alternative meanings become speculative rows;
       a recurrence of a known expansion folds its context in (strengthening
-      contextual confidence) instead of duplicating. A content-word **initials
-      filter** skips acronyms this text can't supply, so the larger mineable set
-      stays cheap per analysis
-- [ ] trie-based single-pass mining — walk the text once over a trie of mineable
-      acronyms (vs the per-acronym scan); the initials filter is the cheap
-      interim win
+      contextual confidence) instead of duplicating
+- [x] trie-based single-pass mining — `MiningTrie` keys acronyms by their letters
+      (`PB&J` → `PBJ`); one DFS walk of the text emits every acronym it spells
+      (filler-tolerant via consume/skip branching, precision guard intact),
+      replacing the per-acronym rescan. O(text) per analysis, not O(acronyms×text)
+- [ ] cache the mining trie in the warm daemon (rebuilt per-analysis today; cheap
+      but redundant when the dictionary is unchanged)
 - [ ] fzf preview pane showing where each candidate/phrase was seen
 
 ## Feature requests / backlog

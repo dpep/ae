@@ -248,56 +248,55 @@ impl Engine {
         Ok(())
     }
 
-    /// Record candidates, mine speculative expansions (same-text and, for other
-    /// watched candidates, cross-text), and accumulate vector coherence.
+    /// Record candidate sightings, then mine speculative expansions in a single
+    /// pass and accumulate vector coherence.
+    ///
+    /// We build one [`MiningTrie`] of everything worth searching for — the
+    /// candidates seen in this text (any length, they were just used here) plus
+    /// the watch list and *all known* acronyms (length ≥ 3, to limit short-acronym
+    /// noise) — and walk the text *once*, emitting every acronym whose word
+    /// initials it spells. That replaces an O(acronyms × text) per-acronym rescan
+    /// with one O(text) traversal, so the mineable set growing stays cheap.
     fn mine(&self, text: &str, query_vec: &[f32], candidates: &[String]) -> rusqlite::Result<()> {
-        let present: std::collections::HashSet<String> =
-            candidates.iter().map(|c| c.to_uppercase()).collect();
-
-        // Candidates mentioned in this text: count them, mine here, and fold
-        // this text into the acronym's context (where it tends to appear).
         for acronym in candidates {
             self.store.record_candidate(acronym)?;
-            let coherence = self.context_coherence(acronym, query_vec)?;
-            for phrase in mine_potentials(text, acronym) {
-                self.store.record_potential(acronym, &phrase, coherence)?;
-            }
-            self.store.update_candidate_context(acronym, query_vec)?;
         }
 
-        // Scan this text for the expansions of the broader set we always keep an
-        // eye on: watch-list candidates (declared / seen often) AND *known*
-        // acronyms — to catch alternative meanings and recurrences. The initials
-        // filter skips, without scanning, any acronym whose letters this text
-        // can't supply, so the set staying large doesn't cost much per analysis.
-        let initials = content_initials(text);
-        let mut mineable: std::collections::HashSet<String> = self
-            .store
-            .watch_list(WATCH_THRESHOLD)?
-            .into_iter()
-            .collect();
-        mineable.extend(self.store.all_acronyms()?);
-        for acronym in mineable {
-            if present.contains(&acronym)
-                || acronym.chars().count() < 3
-                || !letters_present(&acronym, &initials)
-            {
-                continue;
+        let mut trie = MiningTrie::default();
+        for acronym in candidates {
+            trie.insert(acronym);
+        }
+        for acronym in self.store.watch_list(WATCH_THRESHOLD)? {
+            if acronym.chars().count() >= 3 {
+                trie.insert(&acronym);
             }
+        }
+        for acronym in self.store.all_acronyms()? {
+            if acronym.chars().count() >= 3 {
+                trie.insert(&acronym);
+            }
+        }
+
+        // Route each match: a recurrence of a *known* expansion strengthens its
+        // context; anything else is a (new or already-speculative) alternative.
+        for (acronym, phrase) in trie.mine(text) {
             let confirmed = self.store.expansions_for(&acronym)?;
-            let coherence = self.context_coherence(&acronym, query_vec)?;
-            for phrase in mine_potentials(text, &acronym) {
-                match confirmed
-                    .iter()
-                    .find(|(_, e, _)| e.to_lowercase() == phrase)
-                {
-                    // A recurrence of a known expansion → fold this context in,
-                    // which strengthens its contextual-confidence signal.
-                    Some((id, _, _)) => self.store.add_context(*id, query_vec)?,
-                    // A new (or already-speculative) alternative meaning.
-                    None => self.store.record_potential(&acronym, &phrase, coherence)?,
+            match confirmed
+                .iter()
+                .find(|(_, e, _)| e.to_lowercase() == phrase)
+            {
+                Some((id, _, _)) => self.store.add_context(*id, query_vec)?,
+                None => {
+                    let coherence = self.context_coherence(&acronym, query_vec)?;
+                    self.store.record_potential(&acronym, &phrase, coherence)?;
                 }
             }
+        }
+
+        // Fold this text into each present candidate's context — after mining, so
+        // the coherence above reflects prior sightings, not this one.
+        for acronym in candidates {
+            self.store.update_candidate_context(acronym, query_vec)?;
         }
         Ok(())
     }
@@ -323,79 +322,85 @@ fn is_filler(word: &str) -> bool {
     FILLER.contains(&word.to_lowercase().as_str())
 }
 
-/// Uppercase initials of the content (non-filler) words in `text` — the only
-/// letters a mined expansion can supply, since each acronym letter comes from a
-/// content word's initial.
-fn content_initials(text: &str) -> std::collections::HashSet<char> {
-    text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|w| !w.is_empty() && !is_filler(w))
-        .filter_map(|w| w.chars().next())
-        .map(|c| c.to_ascii_uppercase())
-        .collect()
+/// How many words past the anchor a single match may span — bounds how many
+/// fillers we'll skip while spelling out an acronym.
+const MAX_MINE_SPAN: usize = 12;
+
+/// A trie of acronyms keyed by their letters (punctuation stripped, so `PB&J`
+/// keys as `PBJ`), used to mine a whole text for *every* stored acronym's
+/// expansions in one pass instead of rescanning per acronym.
+#[derive(Default)]
+struct MiningTrie {
+    children: std::collections::HashMap<char, MiningTrie>,
+    /// Original acronyms whose letters end at this node (e.g. `PB&J`).
+    terminals: Vec<String>,
 }
 
-/// Cheap necessary condition for [`mine_potentials`] to find anything: every
-/// letter of `acronym` must appear among the text's content-word `initials`.
-/// Lets us skip most acronyms without scanning the text for each.
-fn letters_present(acronym: &str, initials: &std::collections::HashSet<char>) -> bool {
-    acronym
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .all(|c| initials.contains(&c.to_ascii_uppercase()))
-}
-
-/// Mine `text` for phrases whose word-initials spell `acronym` — speculative
-/// expansions casually mentioned (no parens required). Matches the acronym as a
-/// subsequence over words, tolerating skipped filler words, but every *content*
-/// word must contribute a letter (the precision guard) and the phrase is
-/// anchored at content words on both ends. De-duplicated within the text.
-fn mine_potentials(text: &str, acronym: &str) -> Vec<String> {
-    // Letters only — punctuation in the acronym (PB&J, R&D) isn't a word
-    // initial; the '&'/dot maps to a filler word ("and") we already skip.
-    let target: Vec<char> = acronym
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-    if target.is_empty() {
-        return Vec::new();
-    }
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|w| !w.is_empty())
-        .collect();
-    if words.len() < target.len() {
-        return Vec::new();
-    }
-    let initial = |w: &str| w.chars().next().unwrap().to_ascii_uppercase();
-    let max_span = target.len() * 2 + 2; // bound how many fillers we'll skip
-
-    let mut found = Vec::new();
-    for i in 0..words.len() {
-        // Anchor on a content word that opens the acronym.
-        if is_filler(words[i]) || initial(words[i]) != target[0] {
-            continue;
+impl MiningTrie {
+    /// Add `acronym` keyed by its uppercase alphanumeric letters.
+    fn insert(&mut self, acronym: &str) {
+        let mut node = self;
+        let mut any = false;
+        for c in acronym
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase())
+        {
+            node = node.children.entry(c).or_default();
+            any = true;
         }
-        let (mut t, mut last, mut j) = (1usize, i, i + 1);
-        while j < words.len() && t < target.len() && j - i < max_span {
-            if initial(words[j]) == target[t] {
-                t += 1;
-                last = j;
-            } else if !is_filler(words[j]) {
-                break; // a content word that doesn't fit ends the window
-            }
-            j += 1;
+        if any && !node.terminals.iter().any(|a| a == acronym) {
+            node.terminals.push(acronym.to_string());
         }
-        if t == target.len() {
-            let phrase = words[i..=last].join(" ").to_lowercase();
-            if !found.contains(&phrase) {
-                found.push(phrase);
+    }
+
+    /// Every `(acronym, phrase)` the text spells: word-initial subsequences that
+    /// reach a terminal, anchored on a content word, tolerating skipped fillers
+    /// (and consuming one when it supplies the next letter), with every content
+    /// word contributing. De-duplicated.
+    fn mine(&self, text: &str) -> Vec<(String, String)> {
+        let words: Vec<&str> = text
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let mut found = std::collections::HashSet::new();
+        for i in 0..words.len() {
+            if !is_filler(words[i]) {
+                self.walk(&words, i, i, &mut found);
             }
         }
+        found.into_iter().collect()
     }
-    found
+
+    /// Walk from this node, consuming `words[j]`. Branches at a filler that
+    /// matches an edge: try both consuming it and skipping it.
+    fn walk(
+        &self,
+        words: &[&str],
+        anchor: usize,
+        j: usize,
+        found: &mut std::collections::HashSet<(String, String)>,
+    ) {
+        if j >= words.len() || j - anchor >= MAX_MINE_SPAN {
+            return;
+        }
+        let init = words[j].chars().next().unwrap().to_ascii_uppercase();
+        let filler = is_filler(words[j]);
+        if let Some(child) = self.children.get(&init) {
+            let phrase = words[anchor..=j].join(" ").to_lowercase();
+            for acr in &child.terminals {
+                found.insert((acr.clone(), phrase.clone()));
+            }
+            child.walk(words, anchor, j + 1, found);
+            if filler {
+                self.walk(words, anchor, j + 1, found); // also try skipping it
+            }
+        } else if filler {
+            self.walk(words, anchor, j + 1, found); // filler that doesn't fit
+        }
+        // a content word with no matching edge ends this path
+    }
 }
 
 /// Split text into alphanumeric tokens, preserving each token's original
@@ -647,6 +652,30 @@ mod tests {
             .unwrap();
         let pots = e.potentials_for("POC").unwrap();
         assert!(pots.iter().any(|(p, _)| p == "point of contact"));
+    }
+
+    #[test]
+    fn mining_trie_finds_all_acronyms_in_one_pass() {
+        // One traversal yields matches for every stored acronym the text spells.
+        let mut t = MiningTrie::default();
+        for a in ["OKR", "KPI", "POC", "PB&J"] {
+            t.insert(a);
+        }
+        let hits = t.mine("our objectives and key results, the key performance index, point of contact, and peanut butter and jelly");
+        let has = |acr: &str, phrase: &str| hits.iter().any(|(a, p)| a == acr && p == phrase);
+        assert!(has("OKR", "objectives and key results"));
+        assert!(has("KPI", "key performance index"));
+        assert!(has("POC", "point of contact")); // filler "of" consumed
+        assert!(has("PB&J", "peanut butter and jelly")); // '&' keyed as PBJ
+    }
+
+    #[test]
+    fn mining_trie_ignores_a_non_contributing_content_word() {
+        // Precision guard: an unrelated content word between letters breaks it.
+        let mut t = MiningTrie::default();
+        t.insert("ABC");
+        let hits = t.mine("apple banana zebra cat");
+        assert!(hits.iter().all(|(_, p)| p != "apple banana zebra cat"));
     }
 
     #[test]
