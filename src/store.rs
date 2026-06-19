@@ -221,6 +221,16 @@ impl Store {
         Ok(rows)
     }
 
+    /// How many acronyms are on the watch list — a cheap signal for whether the
+    /// mineable set changed (vs rebuilding to find out).
+    pub fn watch_list_count(&self, min_count: i64) -> Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM candidate_acronyms WHERE source = 'declared' OR count >= ?1",
+            params![min_count],
+            |row| row.get(0),
+        )
+    }
+
     /// Candidate acronyms with their `(count, source)`, most-seen first — for
     /// the `candidates` view (provenance + watch state).
     pub fn candidates_detailed(&self) -> Result<Vec<(String, i64, String)>> {

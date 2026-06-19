@@ -224,8 +224,11 @@ candidate).
       (`PB&J` → `PBJ`); one DFS walk of the text emits every acronym it spells
       (filler-tolerant via consume/skip branching, precision guard intact),
       replacing the per-acronym rescan. O(text) per analysis, not O(acronyms×text)
-- [ ] cache the mining trie in the warm daemon (rebuilt per-analysis today; cheap
-      but redundant when the dictionary is unchanged)
+- [x] cache the base mining trie (watch list ∪ known) in the `Engine`, keyed on a
+      cheap `(known, watch-list)` count signature — rebuilt only when it changes
+      (which also catches out-of-band `add`/`rm`/`watch` edits) or ages past a
+      5-min backstop. Per-request candidates use a tiny separate trie. Persists
+      across the warm daemon's requests; the one-shot path builds it once
 - [ ] fzf preview pane showing where each candidate/phrase was seen
 
 ## Feature requests / backlog

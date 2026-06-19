@@ -5,7 +5,8 @@
 //! [`AnalysisPayload`]. The Leader holds one of these for the process lifetime;
 //! the fallback path builds an ephemeral one per invocation.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 
@@ -45,10 +46,25 @@ pub fn prune_grace_secs() -> i64 {
 static PUNCTUATED_ACRONYM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Z][A-Z0-9]*(?:[&.][A-Z0-9]+)+").unwrap());
 
+/// Backstop so the cached mining trie can't outlive an out-of-band edit that
+/// happened to leave the signature unchanged (a rare `rm` + `add` pair).
+const MINING_TRIE_MAX_AGE: Duration = Duration::from_secs(300);
+
+/// The cached base mining trie (watch list ∪ known acronyms), with the cheap
+/// `(known, watch-list)` signature it was built from and when.
+struct MiningCache {
+    trie: Arc<MiningTrie>,
+    signature: (i64, i64),
+    built_at: Instant,
+}
+
 pub struct Engine {
     store: Store,
     trie: SharedTrie,
     embedder: Box<dyn Embedder>,
+    /// Rebuilt only when the signature changes (or it ages out) — cheap to reuse
+    /// across the many requests a warm daemon serves.
+    mining_cache: Mutex<Option<MiningCache>>,
 }
 
 impl Engine {
@@ -62,6 +78,7 @@ impl Engine {
             store,
             trie,
             embedder,
+            mining_cache: Mutex::new(None),
         })
     }
 
@@ -251,35 +268,28 @@ impl Engine {
     /// Record candidate sightings, then mine speculative expansions in a single
     /// pass and accumulate vector coherence.
     ///
-    /// We build one [`MiningTrie`] of everything worth searching for — the
-    /// candidates seen in this text (any length, they were just used here) plus
-    /// the watch list and *all known* acronyms (length ≥ 3, to limit short-acronym
-    /// noise) — and walk the text *once*, emitting every acronym whose word
-    /// initials it spells. That replaces an O(acronyms × text) per-acronym rescan
-    /// with one O(text) traversal, so the mineable set growing stays cheap.
+    /// Mining walks the text once over a [`MiningTrie`], emitting every acronym
+    /// whose word initials it spells — O(text), not O(acronyms × text). The base
+    /// trie (watch list ∪ known acronyms) is cached across requests (see
+    /// [`Self::base_mining_trie`]); the candidates *seen in this text* are mined
+    /// via a tiny per-request trie, so a brand-new one is caught on first sight.
     fn mine(&self, text: &str, query_vec: &[f32], candidates: &[String]) -> rusqlite::Result<()> {
         for acronym in candidates {
             self.store.record_candidate(acronym)?;
         }
 
-        let mut trie = MiningTrie::default();
+        let base = self.base_mining_trie()?;
+        let mut present = MiningTrie::default();
         for acronym in candidates {
-            trie.insert(acronym);
+            present.insert(acronym);
         }
-        for acronym in self.store.watch_list(WATCH_THRESHOLD)? {
-            if acronym.chars().count() >= 3 {
-                trie.insert(&acronym);
-            }
-        }
-        for acronym in self.store.all_acronyms()? {
-            if acronym.chars().count() >= 3 {
-                trie.insert(&acronym);
-            }
-        }
+        let mut matches: std::collections::HashSet<(String, String)> =
+            base.mine(text).into_iter().collect();
+        matches.extend(present.mine(text));
 
         // Route each match: a recurrence of a *known* expansion strengthens its
         // context; anything else is a (new or already-speculative) alternative.
-        for (acronym, phrase) in trie.mine(text) {
+        for (acronym, phrase) in matches {
             let confirmed = self.store.expansions_for(&acronym)?;
             match confirmed
                 .iter()
@@ -299,6 +309,40 @@ impl Engine {
             self.store.update_candidate_context(acronym, query_vec)?;
         }
         Ok(())
+    }
+
+    /// The cached base mining trie (watch list ∪ known acronyms, length ≥ 3).
+    /// Rebuilt only when the cheap `(known, watch-list)` signature changes —
+    /// which also catches out-of-band edits (`add`/`rm`/`watch`/…) since they
+    /// move those counts — or when it ages past [`MINING_TRIE_MAX_AGE`].
+    fn base_mining_trie(&self) -> rusqlite::Result<Arc<MiningTrie>> {
+        let signature = (
+            self.store.count()?,
+            self.store.watch_list_count(WATCH_THRESHOLD)?,
+        );
+        let mut cache = self.mining_cache.lock().unwrap();
+        let fresh = cache.as_ref().is_some_and(|c| {
+            c.signature == signature && c.built_at.elapsed() < MINING_TRIE_MAX_AGE
+        });
+        if !fresh {
+            let mut trie = MiningTrie::default();
+            for acronym in self.store.watch_list(WATCH_THRESHOLD)? {
+                if acronym.chars().count() >= 3 {
+                    trie.insert(&acronym);
+                }
+            }
+            for acronym in self.store.all_acronyms()? {
+                if acronym.chars().count() >= 3 {
+                    trie.insert(&acronym);
+                }
+            }
+            *cache = Some(MiningCache {
+                trie: Arc::new(trie),
+                signature,
+                built_at: Instant::now(),
+            });
+        }
+        Ok(cache.as_ref().unwrap().trie.clone())
     }
 
     /// Cosine of this text's embedding against where `acronym` usually appears
@@ -743,6 +787,19 @@ mod tests {
         e.analyze("the kangaroo population index rose").unwrap();
         let pots = e.potentials_for("KPI").unwrap();
         assert!(pots.iter().any(|(p, _)| p == "kangaroo population index"));
+    }
+
+    #[test]
+    fn mining_trie_cache_picks_up_a_newly_declared_acronym() {
+        let e = Engine::in_memory().unwrap();
+        // First analysis builds the cache without ZZQ on the watch list.
+        e.analyze("nothing to see here").unwrap();
+        // Declaring it shifts the watch-list signature...
+        e.declare_acronym("ZZQ").unwrap();
+        // ...so the next analysis rebuilds the cache and mines it.
+        e.analyze("the zebra zoo quarterly opened").unwrap();
+        let pots = e.potentials_for("ZZQ").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "zebra zoo quarterly"));
     }
 
     #[test]
