@@ -26,13 +26,14 @@ ort = { version = "=2.0.0-rc.12", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 [features]
-# Default: bundle the model into one self-contained binary, and statically link
-# a downloaded ONNX Runtime (zero-config dev/release).
-default = ["bundled-model", "ort-download"]
+# Default favors fast iteration: load the model externally from the build-time
+# cache (no 22 MB `include_bytes!`) and statically link a downloaded ONNX
+# Runtime. Add `--features bundled-model` for the self-contained release artifact.
+default = ["ort-download"]
 
-# Bake the embedding model into the binary. Turn off (`--no-default-features
-# --features ort-download`) to load it externally from the build-time cache —
-# smaller, faster-compiling dev/test binaries.
+# Bake the embedding model into the binary — one self-contained file, at the cost
+# of a bigger artifact and slower link. Opt-in (release/standalone distribution);
+# the default loads the model externally from the build-time cache.
 bundled-model = []
 
 # ONNX Runtime loading strategy (pick exactly one):

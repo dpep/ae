@@ -41,10 +41,11 @@ Rust, single static binary. `rusqlite` (bundled SQLite, WAL) for storage,
 
 The embedding model (`all-MiniLM-L6-v2`, int8-quantized ONNX) is **not in the
 repo** — `build.rs` fetches it at build time into `~/.cache/ae` (reused across
-builds). The default `bundled-model` feature bakes it into the binary (one
-self-contained file); `--no-default-features` loads it externally from the cache
-(dev/test — faster compiles). Offline builds fall back to the deterministic
-`HashEmbedder`. Never commit a model artifact (`.gitignore` blocks `*.onnx`).
+builds). The default loads it externally from that cache (smaller, faster-
+compiling — optimized for iteration); add `--features bundled-model` to bake it
+into one self-contained binary for a standalone release artifact. Offline builds
+fall back to the deterministic `HashEmbedder`. Never commit a model artifact
+(`.gitignore` blocks `*.onnx`).
 
 This machine's Rust came via Homebrew's keg-only `rustup`, so `cargo` may not be
 on `PATH`. Either add it once —
@@ -92,10 +93,11 @@ cargo fmt                    # format — run before committing
 
 Dev/test use `--no-default-features --features ort-download` (external model,
 still a statically-linked downloaded ONNX Runtime) for speed — prefer the `make`
-targets, which set it. The default build also bundles the model; Homebrew builds
-with `--features ort-load-dynamic` (dlopen the keg's ORT at runtime). CI lints/
-tests in dev mode and does a bundled `--release` build to prove the single-binary
-path compiles.
+targets, which set it. This now matches the default feature set, so a bare
+`cargo build` is also external-model/fast. Homebrew builds with `--features
+ort-load-dynamic` (dlopen the keg's ORT). CI lints/tests in dev mode and does a
+`--release --features bundled-model` build to prove the single-binary path
+compiles.
 
 Before committing: `cargo fmt && cargo clippy --all-targets --no-default-features
 --features ort-download -- -D warnings && cargo test --no-default-features

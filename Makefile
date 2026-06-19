@@ -45,10 +45,10 @@ build:
 	$(CARGO) build $(DEV)
 
 release:
-	$(CARGO) build --release
+	$(CARGO) build --release --features bundled-model
 
 install:
-	$(CARGO) install --path .
+	$(CARGO) install --path . --features bundled-model
 
 uninstall:
 	$(CARGO) uninstall $(BIN)

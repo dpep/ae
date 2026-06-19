@@ -40,17 +40,17 @@ cleans itself up.
 ## Install
 
 ```sh
-make install          # cargo install --path . → ~/.cargo/bin/ae  (one self-contained binary)
-# or
-cargo build --release # → target/release/ae
+make install                            # → ~/.cargo/bin/ae  (one self-contained binary)
+# or, for a standalone binary:
+cargo build --release --features bundled-model   # → target/release/ae
 ```
 
 The embedding model is fetched once at build time into a user cache (`~/.cache/ae`,
-reused across rebuilds — never committed). Release/install builds **bake it into
-the binary** so `ae` ships as a single self-contained file; dev/test builds load
-it externally for faster compiles (`make build` / `make test`, i.e.
-`--no-default-features`). Offline builds still work — they fall back to a
-deterministic hash embedder.
+reused across rebuilds — never committed). The default loads it **externally**
+from that cache (smaller, faster compiles — the iteration-friendly default); add
+`--features bundled-model` (what `make install` / `make release` do) to **bake it
+into the binary** so `ae` ships as a single self-contained file. Offline builds
+still work — they fall back to a deterministic hash embedder.
 
 ## Usage
 

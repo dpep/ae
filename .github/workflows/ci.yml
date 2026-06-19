@@ -48,5 +48,6 @@ jobs:
         run: cargo test --no-default-features --features ort-download
 
       # Prove the single self-contained binary (model bundled in) compiles.
+      # bundled-model is opt-in now that the default loads the model externally.
       - name: release build (bundled model)
-        run: cargo build --release
+        run: cargo build --release --features bundled-model
