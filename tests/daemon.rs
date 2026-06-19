@@ -102,6 +102,33 @@ fn daemon_starts_serves_a_follower_and_stops() {
 }
 
 #[test]
+fn daemon_flag_with_input_warms_and_serves() {
+    let sock = scratch_socket("dwork");
+    assert!(!connectable(&sock), "no daemon should be running yet");
+
+    // `ae -d "text"` starts the daemon AND analyzes — printing the analysis, not
+    // the daemon status — and leaves the daemon warm.
+    let (ok, body) = run(&sock, &["-d", "-j", "Check the OKR board."], "30");
+    assert!(ok, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["expansions"][0]["acronym"], "OKR");
+    assert!(
+        !body.contains("\"status\""),
+        "printed daemon status, not analysis: {body}"
+    );
+    assert!(connectable(&sock), "daemon should be left running warm");
+
+    // The warm daemon serves a subsequent plain query.
+    let v2: serde_json::Value = serde_json::from_str(&query(&sock, "Another OKR.")).unwrap();
+    assert_eq!(v2["expansions"][0]["acronym"], "OKR");
+
+    let (stopped, _) = run(&sock, &["--stop"], "30");
+    assert!(stopped);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    cleanup(&sock);
+}
+
+#[test]
 fn idle_daemon_reaps_itself() {
     let sock = scratch_socket("janitor");
 

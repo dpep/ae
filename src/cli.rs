@@ -22,7 +22,8 @@ pub struct Cli {
     /// Context text to scan. Optional when piping input via stdin.
     pub text: Option<String>,
 
-    /// Start a detached background daemon (the warm Leader).
+    /// Use the warm background daemon, starting it if needed. With input, also
+    /// analyzes it (and leaves the daemon warm); with none, just starts it.
     #[arg(short, long)]
     pub daemon: bool,
 
@@ -190,47 +191,70 @@ pub fn run() -> ExitCode {
         };
     }
 
-    if cli.daemon {
-        return match ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref()) {
-            Ok(ipc::DaemonOutcome::Started) => status(fmt, cli.quiet, "started", "daemon started"),
-            Ok(ipc::DaemonOutcome::AlreadyRunning) => {
-                status(fmt, cli.quiet, "already_running", "daemon already running")
-            }
-            Err(e) => fail(fmt, &format!("could not start daemon: {e}")),
-        };
-    }
-
-    // A file or explicit batch flag runs the aggregated line-by-line path.
+    // The batch/file path is a bulk in-process pass; `-d` just also warms a
+    // daemon for the single-text calls that tend to follow.
     if cli.batch || cli.file.is_some() {
+        if cli.daemon {
+            let _ = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref());
+        }
         return run_batch(&cli, fmt);
     }
 
-    // Bare invocation with nothing to analyze: show help instead of an error.
-    if cli.text.is_none() && io::stdin().is_terminal() {
-        let _ = Cli::command().print_help();
-        println!();
-        return ExitCode::SUCCESS;
+    // Resolve the single-text input once (reads stdin if piped). `Err` means
+    // there's nothing to analyze.
+    let input = determine_input(&cli);
+
+    // `-d/--daemon`: ensure a warm Leader, then serve the input through it (so
+    // the next calls are fast too). With nothing to analyze, it has simply
+    // (ensured the daemon is) started — report that and leave it running.
+    if cli.daemon {
+        let outcome = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref());
+        let Ok(text) = input else {
+            return match outcome {
+                Ok(ipc::DaemonOutcome::Started) => {
+                    status(fmt, cli.quiet, "started", "daemon started")
+                }
+                Ok(ipc::DaemonOutcome::AlreadyRunning) => {
+                    status(fmt, cli.quiet, "already_running", "daemon already running")
+                }
+                Err(e) => fail(fmt, &format!("could not start daemon: {e}")),
+            };
+        };
+        if let Err(e) = outcome {
+            log::debug!("daemon unavailable ({e}); evaluating in-process");
+        }
+        return serve_text(&cli, fmt, &text);
     }
 
-    let text = match determine_input(&cli) {
+    // Bare invocation with nothing to analyze: show help instead of an error.
+    let text = match input {
         Ok(t) => t,
+        Err(_) if cli.text.is_none() && io::stdin().is_terminal() => {
+            let _ = Cli::command().print_help();
+            println!();
+            return ExitCode::SUCCESS;
+        }
         Err(e) => return fail(fmt, &e),
     };
+    serve_text(&cli, fmt, &text)
+}
 
-    let payload = match ipc::run_follower(&cli.socket, &text, cli.read_only) {
+/// Serve one chunk of text: proxy to the daemon if one is up, else self-heal by
+/// evaluating in-process, then render the result.
+fn serve_text(cli: &Cli, fmt: Format, text: &str) -> ExitCode {
+    let payload = match ipc::run_follower(&cli.socket, text, cli.read_only) {
         Ok(p) => {
             log::debug!("served by daemon");
             p
         }
         Err(_) => {
             log::debug!("no daemon; evaluating in-process");
-            match evaluate_in_process(&cli, &text) {
+            match evaluate_in_process(cli, text) {
                 Ok(p) => p,
                 Err(e) => return fail(fmt, &format!("evaluation failed: {e}")),
             }
         }
     };
-
     if !cli.quiet {
         let stdout = io::stdout();
         if let Err(e) = output::render(&mut stdout.lock(), &payload, fmt) {
@@ -327,6 +351,11 @@ fn read_raw_input(cli: &Cli) -> Result<String, String> {
 /// Resolve the text to analyze: piped stdin wins; otherwise the positional
 /// argument; otherwise an error.
 pub fn determine_input(cli: &Cli) -> Result<String, String> {
+    // An explicit positional arg wins (so `ae "text"` and `ae -d "text"` work the
+    // same whether or not stdin is a tty); piped stdin is the fallback.
+    if let Some(text) = &cli.text {
+        return Ok(text.clone());
+    }
     if !io::stdin().is_terminal() {
         let mut buffer = String::new();
         io::stdin()
@@ -336,12 +365,9 @@ pub fn determine_input(cli: &Cli) -> Result<String, String> {
         if trimmed.is_empty() {
             return Err("no input on stdin".into());
         }
-        Ok(trimmed)
-    } else if let Some(text) = &cli.text {
-        Ok(text.clone())
-    } else {
-        Err("no input: pass text as an argument or pipe it via stdin".into())
+        return Ok(trimmed);
     }
+    Err("no input: pass text as an argument or pipe it via stdin".into())
 }
 
 /// Run a dictionary management command against the `--db` store.

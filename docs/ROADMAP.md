@@ -19,7 +19,11 @@ commit.
 ## Milestone 1 — CLI, stream isolation, piping
 
 - [x] `Cli` struct + `Format {human,json,ndjson}` (clap derive)
-- [x] stream splitting: non-TTY stdin → read to string; else positional arg; else error
+- [x] input resolution: positional arg wins; else non-TTY stdin → read to string;
+      else (TTY, no arg) help/error
+- [x] `-d/--daemon` with input ensures a warm daemon, then serves the work through
+      it (≈ `ae -d && ae <text>`, one process, prints only the analysis); bare
+      `ae -d` just starts it
 - [x] `env_logger` to stderr; stdout reserved for data
 - [x] `--verbose` raises log level
 - [x] unit + e2e tests for input resolution and format flags
