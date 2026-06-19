@@ -64,6 +64,12 @@ CREATE TABLE IF NOT EXISTS candidate_contexts (
     mean BLOB NOT NULL,
     n INTEGER NOT NULL DEFAULT 0
 );
+
+-- Small key/value store for housekeeping state, e.g. when consolidation last ran.
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 /// How often an acronym must be *seen* (or be declared) before it joins the
@@ -93,6 +99,15 @@ pub const DEFAULT_DICTIONARY: &[(&str, &str)] = &[
 
 pub struct Store {
     conn: Connection,
+}
+
+/// What a [`Store::consolidate`] pass changed — reported by `ae prune`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ConsolidateStats {
+    pub corrected: usize,
+    pub merged: usize,
+    pub dropped: usize,
+    pub candidates: usize,
 }
 
 impl Store {
@@ -433,6 +448,80 @@ impl Store {
             [],
         )?;
         Ok(n)
+    }
+
+    /// Consolidate speculation — the shared body of `ae prune` and the periodic
+    /// auto-job. The *quality* steps (spell-correct mined words, then merge
+    /// near-duplicate expansions) run first and boost confidence by pooling
+    /// evidence; the *cleanup* steps (drop low-confidence rows and seen-once
+    /// noise candidates, both sparing anything within `grace_secs`) follow.
+    pub fn consolidate(&self, min_confidence: f32, grace_secs: i64) -> Result<ConsolidateStats> {
+        // 1. Spell-correct mined words against the system list (if installed), so
+        //    fixed forms then merge in dedup.
+        let mut corrected = 0;
+        if let Some(words) = crate::spell::load_wordlist() {
+            for (acronym, expansion, count, coh) in self.all_potentials()? {
+                let fixed = crate::spell::correct(&expansion, &words);
+                if fixed != expansion {
+                    self.delete_potential(&acronym, &expansion)?;
+                    self.accumulate_potential(&acronym, &fixed, count, coh)?;
+                    corrected += 1;
+                }
+            }
+        }
+        // 2. Merge near-duplicate expansions.
+        let mut merged = 0;
+        for acronym in self.distinct_potential_acronyms()? {
+            merged += self.dedup_potentials(&acronym)?;
+        }
+        // 3. Drop low-confidence mined rows (sparing recently seen ones).
+        let recent = self.recent_potentials(grace_secs)?;
+        let all = self.all_potentials()?;
+        let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (acronym, _, count, _) in &all {
+            *totals.entry(acronym.clone()).or_insert(0) += count;
+        }
+        let mut dropped = 0;
+        for (acronym, expansion, count, coh) in all {
+            if confidence(count, coh, totals[&acronym]) < min_confidence
+                && !recent.contains(&(acronym.clone(), expansion.clone()))
+            {
+                dropped += self.delete_potential(&acronym, &expansion)?;
+            }
+        }
+        // 4. Clear noise candidates.
+        let candidates = self.prune_noise_candidates(grace_secs)?;
+
+        self.mark_consolidated()?;
+        Ok(ConsolidateStats {
+            corrected,
+            merged,
+            dropped,
+            candidates,
+        })
+    }
+
+    /// True if consolidation hasn't run within the last `interval_secs` (or has
+    /// never run) — the cadence gate for the auto-job.
+    pub fn consolidate_due(&self, interval_secs: i64) -> Result<bool> {
+        let cutoff = format!("-{} seconds", interval_secs.max(0));
+        let due: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(value <= datetime('now', ?1)), 1)
+             FROM meta WHERE key = 'last_consolidated'",
+            params![cutoff],
+            |row| row.get(0),
+        )?;
+        Ok(due != 0)
+    }
+
+    /// Stamp the last-consolidated time as now.
+    pub fn mark_consolidated(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('last_consolidated', datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = datetime('now')",
+            [],
+        )?;
+        Ok(())
     }
 
     /// The running-mean context embedding for a candidate acronym, if any.
@@ -903,6 +992,15 @@ mod tests {
                 .unwrap()
                 .contains(&("KPI".into(), "key performance indicator".into()))
         );
+    }
+
+    #[test]
+    fn consolidation_cadence_gates_on_last_run() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.consolidate_due(3600).unwrap()); // never run → due
+        s.mark_consolidated().unwrap();
+        assert!(!s.consolidate_due(3600).unwrap()); // just ran → not due within an hour
+        assert!(s.consolidate_due(0).unwrap()); // 0 interval → always due
     }
 
     #[test]

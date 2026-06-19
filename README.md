@@ -108,13 +108,13 @@ match wins over its parts (`PB&J` beats `PB`, maximal munch).
 (`/usr/share/dict/words`, if present — nothing bundled), so "minimum viabel
 product" converges to "minimum viable product" before dedup.
 
-You rarely need to run it by hand: a cheap subset (dedup + drop low-confidence +
-clear noise, no spell-fix) runs **automatically** with a small random chance
-after each write — in-process and, especially, in the warm daemon — to amortize
-the cost. Tune or disable it with `AE_GC_PERCENT` (default `5`, `0` off). A
-candidate seen within `AE_PRUNE_GRACE_SECS` (default ~30 days — volume is low, so
-we're patient) is spared, so a token you saw once can recur weeks later before
-it's ever considered noise.
+You rarely need to run it by hand: the same pass runs **automatically** on a
+cadence after a write — at most once per `AE_CONSOLIDATE_SECS` (default daily; a
+negative value disables it). The point is the *quality* half — spell-fix and
+dedup pool evidence and lift confidence — so it's worth running regularly; the
+deletion half is gentle (a candidate seen within `AE_PRUNE_GRACE_SECS`, default
+~30 days, is spared, so an infrequent token can recur weeks later before it's
+ever considered noise). The warm daemon amortizes it across requests.
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An

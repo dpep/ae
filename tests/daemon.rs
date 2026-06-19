@@ -34,7 +34,7 @@ fn run(socket: &Path, args: &[&str], idle_secs: &str) -> (bool, String) {
         .arg(socket.with_extension("db"))
         .args(args)
         .env("AE_IDLE_SECS", idle_secs)
-        .env("AE_GC_PERCENT", "0")
+        .env("AE_CONSOLIDATE_SECS", "-1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -195,9 +195,11 @@ candidate).
       mining) once declared or seen `count` >= `WATCH_THRESHOLD` (3); `prune`
       keeps declared candidates, drops seldom-seen `seen` ones
 - [x] `ae candidates` shows provenance (`declared`/`seen`) + watch state
-- [x] amortized auto-GC: `should_gc()` (random `AE_GC_PERCENT`, default 5; `0`
-      disables for tests) runs `Engine::gc` (dedup + drop low-conf + prune noise,
-      no spell) after a write, in-process and in the warm daemon
+- [x] consolidation = the unified `Store::consolidate` (spell-fix + dedup →
+      quality; drop low-conf + clear noise → cleanup), shared by `ae prune` and
+      the auto-job. Cadence-gated (`AE_CONSOLIDATE_SECS`, default daily; negative
+      disables) via a `meta` table, so dedup/spell run regularly to lift
+      confidence; runs in-process and in the warm daemon
 - [x] prune grace — a candidate seen within `AE_PRUNE_GRACE_SECS` (default ~30
       days, low volume → patient; `0` = immediate) is spared, so an infrequent
       token isn't yanked before it can recur weeks later. Same grace gates the

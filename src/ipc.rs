@@ -213,9 +213,9 @@ fn handle_connection(
                 log::warn!("analysis failed: {e}");
                 AnalysisPayload::empty(text)
             });
-            // The warm daemon amortizes GC across requests.
-            if !read_only && crate::engine::should_gc() {
-                let _ = engine.gc(
+            // The warm daemon consolidates on a cadence across requests.
+            if !read_only {
+                let _ = engine.consolidate_if_due(
                     crate::store::PRUNE_MIN_CONFIDENCE,
                     crate::engine::prune_grace_secs(),
                 );

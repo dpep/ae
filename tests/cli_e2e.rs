@@ -26,9 +26,9 @@ struct Output {
 }
 
 /// Run `ae` with `args`, feeding `stdin` (or an empty closed stdin if `None`).
-/// Auto-GC is disabled so tests are deterministic.
+/// Auto-consolidation is disabled so tests are deterministic.
 fn run(socket: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Output {
-    run_with_env(socket, args, stdin, &[("AE_GC_PERCENT", "0")])
+    run_with_env(socket, args, stdin, &[("AE_CONSOLIDATE_SECS", "-1")])
 }
 
 /// Like [`run`], but with explicit env overrides — e.g. forcing GC on.
@@ -587,11 +587,11 @@ fn add_without_expansion_declares_an_acronym() {
 }
 
 #[test]
-fn auto_gc_runs_after_a_write_and_prunes_noise() {
+fn auto_consolidation_runs_after_a_write_and_prunes_noise() {
     let sock = scratch_socket("autogc");
-    // Force GC on every write, with no grace, so the seen-once noise candidate
-    // is cleaned up by the GC that fires right after this analysis.
-    let env = [("AE_GC_PERCENT", "100"), ("AE_PRUNE_GRACE_SECS", "0")];
+    // Consolidate due on every write (interval 0), no grace, so the seen-once
+    // noise candidate is cleaned up by the pass that fires after this analysis.
+    let env = [("AE_CONSOLIDATE_SECS", "0"), ("AE_PRUNE_GRACE_SECS", "0")];
     let a = run_with_env(&sock, &["-j"], Some("the ZZQ widget"), &env);
     let v: serde_json::Value = serde_json::from_str(&a.stdout).unwrap();
     assert!(
@@ -602,7 +602,7 @@ fn auto_gc_runs_after_a_write_and_prunes_noise() {
             .any(|c| c == "ZZQ")
     );
 
-    // The candidate is gone — GC pruned it (read-only command, GC won't refire).
+    // The candidate is gone — consolidation pruned it (read-only command won't refire).
     let c = run_with_env(&sock, &["candidates", "-j"], None, &env);
     let cv: serde_json::Value = serde_json::from_str(&c.stdout).unwrap();
     assert!(cv.as_array().unwrap().iter().all(|r| r["acronym"] != "ZZQ"));

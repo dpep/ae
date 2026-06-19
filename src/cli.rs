@@ -248,13 +248,11 @@ fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::
         return engine.expand_only(text);
     }
     let payload = engine.analyze(text)?;
-    // Amortize GC across writes (skip on a best-effort error).
-    if crate::engine::should_gc() {
-        let _ = engine.gc(
-            crate::store::PRUNE_MIN_CONFIDENCE,
-            crate::engine::prune_grace_secs(),
-        );
-    }
+    // Amortized consolidation on a cadence (best-effort).
+    let _ = engine.consolidate_if_due(
+        crate::store::PRUNE_MIN_CONFIDENCE,
+        crate::engine::prune_grace_secs(),
+    );
     Ok(payload)
 }
 
@@ -540,45 +538,17 @@ fn run_suggest(
 /// GC speculation: spell-correct mined expansions, dedup (prefix + fuzzy), drop
 /// low-confidence ones, and remove seen-once noise candidates.
 fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) -> ExitCode {
-    let result = (|| -> rusqlite::Result<(usize, usize, usize, usize)> {
-        // Spell-correct first (if a word list exists) so fixed forms then merge.
-        let mut corrected = 0;
-        if let Some(words) = crate::spell::load_wordlist() {
-            for (acronym, expansion, count, coh) in store.all_potentials()? {
-                let fixed = crate::spell::correct(&expansion, &words);
-                if fixed != expansion {
-                    store.delete_potential(&acronym, &expansion)?;
-                    store.accumulate_potential(&acronym, &fixed, count, coh)?;
-                    corrected += 1;
-                }
-            }
-        }
-        let mut merged = 0;
-        for acronym in store.distinct_potential_acronyms()? {
-            merged += store.dedup_potentials(&acronym)?;
-        }
-        let grace = crate::engine::prune_grace_secs();
-        let recent = store.recent_potentials(grace)?;
-        let mut dropped = 0;
-        for (acronym, expansion, _, conf) in score_potentials(store, None)? {
-            if conf < min && !recent.contains(&(acronym.clone(), expansion.clone())) {
-                dropped += store.delete_potential(&acronym, &expansion)?;
-            }
-        }
-        let candidates = store.prune_noise_candidates(grace)?;
-        Ok((corrected, merged, dropped, candidates))
-    })();
-
-    match result {
-        Ok((corrected, merged, dropped, candidates)) => {
+    match store.consolidate(min, crate::engine::prune_grace_secs()) {
+        Ok(s) => {
             if !quiet {
                 match fmt {
                     Format::Human => println!(
-                        "ae: pruned — corrected {corrected}, merged {merged}, dropped {dropped} low-confidence, removed {candidates} noise candidates"
+                        "ae: pruned — corrected {}, merged {}, dropped {} low-confidence, removed {} noise candidates",
+                        s.corrected, s.merged, s.dropped, s.candidates
                     ),
                     _ => println!(
                         "{}",
-                        serde_json::json!({"status": "pruned", "corrected": corrected, "merged": merged, "dropped": dropped, "candidates_removed": candidates})
+                        serde_json::json!({"status": "pruned", "corrected": s.corrected, "merged": s.merged, "dropped": s.dropped, "candidates_removed": s.candidates})
                     ),
                 }
             }
