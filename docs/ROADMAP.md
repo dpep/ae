@@ -229,6 +229,11 @@ candidate).
       (which also catches out-of-band `add`/`rm`/`watch` edits) or ages past a
       5-min backstop. Per-request candidates use a tiny separate trie. Persists
       across the warm daemon's requests; the one-shot path builds it once
+- [ ] cap/dedup `acronym_contexts` rows — mining a recurrence of a known
+      expansion appends a context embedding every time (`add_context`), so the
+      table grows unbounded for frequently-seen acronyms and `Engine::contextual`
+      scans all of them. Keep a running mean (like `candidate_contexts`) or cap
+      to the most recent/representative N, folded into consolidation
 - [ ] fzf preview pane showing where each candidate/phrase was seen
 
 ## Feature requests / backlog
