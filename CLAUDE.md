@@ -67,9 +67,11 @@ ae/
     lib.rs       ← module wiring
     cli.rs       ← Cli/Format, input resolution, role dispatch, run()
     types.rs     ← AnalysisPayload and friends (the serialized contract)
+    output.rs    ← render an AnalysisPayload to stdout per format
     mrl.rs       ← Matryoshka truncate + L2 normalize + cosine
     trie.rs      ← thread-safe prefix tree
     store.rs     ← SQLite schema, dictionary, vector store
+    spell.rs     ← system-wordlist spell-correction for mined expansions
     embed.rs     ← Embedder trait, HashEmbedder, default_embedder
     embed/onnx.rs← OnnxEmbedder: model resolution, inference, mean-pool
     learn.rs     ← rule-based acronym/definition extraction
