@@ -1,41 +1,67 @@
 # ae — Acronym Engine
 
-Ultra-lightweight, local-first acronym expansion and definition extraction for
-the command line and for LLM processes that need real-time jargon resolution.
+Acronym extraction and expansion — local, offline.
 
-Feed it text; it sorts the acronyms into three buckets at once:
+`ae` reads the text that flows past it and sorts every acronym into three buckets at once:
 
 1. **expansions** — known acronyms, resolved from the dictionary and ranked.
-2. **extractions** — acronyms *defined inline* (`KPI (Key Performance
-   Indicator)`); the new term is extracted and the dictionary grows as it reads.
-3. **candidates** — acronym-shaped tokens it doesn't recognize and that aren't
-   defined inline (e.g. `MVP` in "ship the MVP") — candidates for you to define.
+2. **extractions** — acronyms defined inline (`KPI (Key Performance Indicator)`); the new term is pulled out, and the dictionary grows as it reads.
+3. **candidates** — acronym-shaped tokens it doesn't recognize and that aren't defined inline — flagged for you to define.
 
 ```sh
-$ ae "Our KPI (Key Performance Indicator) gates the OKR review, then the MVP."
-KPI  Key Performance Indicator        extraction 0.95
-OKR  Objectives and Key Results       expansion  v1.00 c0.80
-MVP  (no expansion)                   candidate
-
-$ cat notes.md | ae -j
-{ "sentence": "...", "expansions": [...], "extractions": [...], "candidates": [...] }
+$ ae "The OKR review needs a TPS (Transaction Processing System) sign-off before the XYZ ships."
+OKR      Objectives and Key Results               expansion  v1.00 c0.50
+TPS      Transaction Processing System            extraction 0.95
+XYZ      (no expansion)                           candidate
 ```
 
-Expansions carry two scores: **validity** (`v` — is this a real expansion of the
-acronym; 1.0 when a human verified it, 0.9 for an inline definition) and
-**confidence** (`c` — does it fit *this* sentence, from context vectors). Under
-the hood every `(acronym, expansion)` lives on one continuum by `source`:
-`user` (verified) > `inline` > `mined` (speculative) — `ae list` shows the
-`source`/`verified` of each, `ae suggest` shows the speculative tail.
+Unlike a static glossary, ae grows its own dictionary by watching the stream — extracting inline definitions, and *mining* speculative expansions from prose where word initials spell a watched acronym (no parentheses needed).
 
-## Why
+## Two scores, not one
 
-LLM sessions and terminal pipelines hit unfamiliar acronyms constantly. `ae`
-resolves them locally — no network, tiny footprint — and gets faster across
-concurrent callers by electing one in-process **Leader** that holds the warm
-state while everyone else proxies to it over a Unix domain socket. No daemon to
-manage: the first caller becomes the leader, the rest follow, and an idle leader
-cleans itself up.
+Every `(acronym, expansion)` pair carries two independent scores — the idea ae is built on:
+
+- **validity** (`v`) — *is this a real expansion of the acronym?* Set by how the pair was learned: `1.0` when a human verified it, `0.9` for an inline definition, `0.0` for a speculative mined guess.
+- **confidence** (`c`) — *is this the meaning here?* Cosine fit of the sentence against the contexts where the expansion has appeared; `0.5` with no evidence yet.
+
+Validity asks whether the expansion is real; confidence asks whether it's right *for this sentence*. A pair can be rock-solid valid (`PT → Part Time`) yet low-confidence in a physical-therapy paragraph. Both ride a provenance continuum by source — `user` (verified) > `inline` > `mined` (speculative) — which drives ranking, what shows where, and what gets pruned.
+
+## Built for pipes and agents
+
+ae's real interface is a pipe: send text on stdin, read structured JSON on stdout — `-j` for a pretty object, `-J` for NDJSON:
+
+```sh
+$ printf 'ship the MVP this sprint' | ae -j
+{
+  "sentence": "ship the MVP this sprint",
+  "expansions": [
+    {
+      "acronym": "MVP",
+      "text_slice": "MVP",
+      "matches": [
+        {
+          "expansion": "most valuable player",
+          "validity": 1.0,
+          "confidence": 0.43420324
+        }
+      ]
+    }
+  ],
+  "extractions": [],
+  "candidates": []
+}
+```
+
+Agents and tools hit org-specific acronyms constantly and can't phone a server for them — ae resolves them locally, in-process, in milliseconds.
+
+## Why local-first
+
+No network calls, ever. The dictionary is a bundled SQLite database
+(`$XDG_DATA_HOME/ae/acronyms.db`); embeddings run locally via a quantized ONNX
+model, with a deterministic hash-embedder fallback so offline builds still work.
+Across concurrent callers, ae elects one in-process **Leader** that holds the
+warm state behind a Unix socket while the rest proxy to it — no daemon to manage,
+and an idle Leader cleans itself up.
 
 ## Install
 
@@ -54,27 +80,16 @@ hash embedder.
 
 ## Usage
 
-```text
-ae [TEXT] [OPTIONS]
-
-  TEXT                 text to scan; optional when piping via stdin
-  -j, --json           JSON output (pretty object)
-  -J, --ndjson         NDJSON output (one object per line)
-  -b, --batch          analyze input line by line, aggregated with line:col
-  -f, --file <PATH>    read input from a file (implies --batch)
-  -r, --read-only      expand only — never extract or persist new acronyms
-  -m, --model <SPEC>   embedding model: a path (dir or .onnx) or a name
-  -d, --daemon         start a detached background leader
-      --stop           stop the running background leader
-      --db <PATH>      acronym dictionary    [env: AE_DB] [default: data dir]
-      --socket <PATH>  UDS path                      [default: /tmp/ae.sock]
-  -v, --verbose        engine telemetry to stderr
+```sh
+ae "text to scan"          # analyze a string
+cat file | ae              # analyze stdin (-j / -J for JSON / NDJSON)
+ae -b -f notes.md          # batch: line-by-line, line:col-tagged hits
+ae -r "…"                  # read-only: expand known acronyms, never learn
 ```
 
-The learned dictionary persists in a SQLite database — by default
-`$XDG_DATA_HOME/ae/acronyms.db` (else `~/.local/share/ae/acronyms.db`), or
-wherever `--db`/`$AE_DB` points. The daemon and the in-process fallback share it,
-so acronyms learned in one invocation are available to the next.
+Full flags and subcommands: `ae --help`. The learned dictionary persists in
+SQLite (`$XDG_DATA_HOME/ae/acronyms.db`); the daemon and the in-process fallback
+share it, so what's learned in one call is there for the next.
 
 ### Managing the dictionary
 
@@ -87,7 +102,7 @@ ae list                               # list everything
 ae list perf                          # filter by substring of acronym or expansion
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
-ae watch PB&J                         # declare a token is an acronym (same as `add PB&J`)
+ae add PB&J                           # declare a token as an acronym (ae mines its expansion later)
 ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
 ae define MVP                         # promote interactively (fzf), or pass expansions
 ae prune                              # GC: spell-fix + dedup (prefix+fuzzy) + drop noise
@@ -97,10 +112,10 @@ ae prune                              # GC: spell-fix + dedup (prefix+fuzzy) + d
 learns; `ae add … -q` adds without printing).
 
 Each acronym has a **provenance**: `declared` (you said it's an acronym, via
-`ae watch` or `ae add ACR` with no expansion) or `seen` (ae noticed it). An
-acronym joins the **watch list** — where we hunt its expansions in later text —
-once it's declared or has been *seen* enough times (default 3); below that it's
-noise and `ae prune` drops it. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
+`ae add ACR` with no expansion) or `seen` (ae noticed it). An acronym joins the
+**watch list** — where we hunt its expansions in later text — once it's declared
+or has been *seen* enough times (default 3); below that it's noise and `ae prune`
+drops it. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
 detected and mined too (the `&`/`.` maps to a skipped filler word), and a longer
 match wins over its parts (`PB&J` beats `PB`, maximal munch).
 

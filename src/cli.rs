@@ -12,8 +12,30 @@ use clap::{CommandFactory, Parser, Subcommand};
 use crate::engine::Engine;
 use crate::{ipc, output};
 
+const AFTER_HELP: &str = "\
+Analyzing text returns three buckets:
+  expansions   known acronyms, resolved from the dictionary and ranked
+  extractions  acronyms defined inline now, e.g. KPI (Key Performance Indicator)
+  candidates   acronym-shaped tokens seen but not yet resolved — to define later
+
+Each expansion carries two scores: validity (is it a real expansion?) and
+confidence (is it the meaning here?). -j/--json and -J/--ndjson switch to
+machine output on every command.
+
+Examples:
+  ae \"ship the MVP this sprint\"     analyze a string
+  cat notes.md | ae -j               analyze stdin, emit JSON
+  ae add OKR                         declare an acronym to watch & mine
+  ae list perf                       list entries matching \"perf\"";
+
 #[derive(Parser, Debug)]
-#[command(name = "ae", author, version, about = "Acronym Engine")]
+#[command(
+    name = "ae",
+    author,
+    version,
+    about = "Extract and expand your org's acronyms — local and offline.",
+    after_help = AFTER_HELP
+)]
 pub struct Cli {
     /// Dictionary management subcommand. Omit to analyze text (the default).
     #[command(subcommand)]
@@ -22,8 +44,9 @@ pub struct Cli {
     /// Context text to scan. Optional when piping input via stdin.
     pub text: Option<String>,
 
-    /// Use the warm background daemon, starting it if needed. With input, also
-    /// analyzes it (and leaves the daemon warm); with none, just starts it.
+    /// Route through a warm background daemon (faster for repeated calls),
+    /// starting one if needed. With input, analyzes it too; with none, just
+    /// starts the daemon.
     #[arg(short, long)]
     pub daemon: bool,
 
@@ -110,13 +133,13 @@ pub enum Format {
 /// dictionary directly (no model needed).
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// List acronyms and expansions, optionally filtered by a substring of
-    /// either (`ae list perf`). An alias for the former `search`.
+    /// List acronyms and expansions, optionally filtered by a substring of either.
     List { filter: Option<String> },
     /// Show the expansions of one acronym.
     Show { acronym: String },
     /// Add an acronym with one or more expansions. With no expansion, just
-    /// declares the token is an acronym (same as `watch`) — "figure it out".
+    /// declares the token as an acronym to watch — ae mines later text for
+    /// what it expands to.
     Add {
         acronym: String,
         expansions: Vec<String>,
