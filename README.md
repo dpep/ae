@@ -40,9 +40,9 @@ $ printf 'ship the MVP this sprint' | ae -j
       "text_slice": "MVP",
       "matches": [
         {
-          "expansion": "most valuable player",
+          "expansion": "minimum viable product",
           "validity": 1.0,
-          "confidence": 0.43420324
+          "confidence": 0.5
         }
       ]
     }
@@ -149,11 +149,13 @@ later sentence that never repeats the acronym still accrues). It counts how ofte
 each phrase recurs and how well its context fits where the acronym is used, then
 blends both into a confidence:
 
-```
-$ ae suggest MVP --min-confidence 0
-MVP   minimum viable product    0.50 (2)
-MVP   min viable product        0.25 (1)
-MVP   most valuable player      0.25 (1)
+```sh
+$ ae add FOO                                          # declare it — start watching
+ae: now watching FOO for expansions
+$ ae "the Foundations Of Onboarding workshop was great"   # initials spell FOO
+No acronyms found.
+$ ae suggest FOO --min-confidence 0                   # ae mined the phrase
+FOO   foundation of onboarding   0.50 (1)
 ```
 
 Confirm one with `ae define MVP` (interactive) or `ae add MVP "Minimum Viable

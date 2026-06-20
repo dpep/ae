@@ -95,6 +95,7 @@ pub const DEFAULT_DICTIONARY: &[(&str, &str)] = &[
     ("MRL", "Matryoshka Representation Learning"),
     ("LLM", "Large Language Model"),
     ("RAM", "Random Access Memory"),
+    ("MVP", "minimum viable product"),
 ];
 
 pub struct Store {
