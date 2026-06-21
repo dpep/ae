@@ -1,5 +1,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    ae::cli::run()
+    acronym_engine::cli::run()
 }

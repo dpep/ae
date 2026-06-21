@@ -3,8 +3,8 @@
 //! time); offline builds that fell back to the hash embedder skip them rather
 //! than fail.
 
-use ae::embed::{Embedder, OnnxEmbedder};
-use ae::mrl::{compress_matryoshka_vector, cosine_similarity};
+use acronym_engine::embed::{Embedder, OnnxEmbedder};
+use acronym_engine::mrl::{compress_matryoshka_vector, cosine_similarity};
 
 /// Compress through the same MRL pipeline the engine uses.
 fn vec_of(e: &OnnxEmbedder, text: &str) -> Vec<f32> {
@@ -37,7 +37,7 @@ fn the_compressed_vector_is_64_dims_and_unit_norm() {
         return;
     };
     let v = vec_of(&e, "Key Performance Indicator");
-    assert_eq!(v.len(), ae::mrl::MRL_DIMS);
+    assert_eq!(v.len(), acronym_engine::mrl::MRL_DIMS);
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     assert!((norm - 1.0).abs() < 1e-4, "norm was {norm}");
 }

@@ -1,15 +1,13 @@
 //! The real embedder: `all-MiniLM-L6-v2` (int8-quantized ONNX) via ONNX
 //! Runtime, with mean pooling over the token embeddings.
 //!
-//! The model and tokenizer are loaded from bytes — either baked into the binary
-//! (default `bundled-model` feature → one self-contained file) or read from
-//! disk (dev/test, an explicit `--model`, or a packaged install). Resolution
-//! order when no explicit model is requested: `$AE_MODEL_DIR` → bundled bytes →
-//! the build-time cache path → the standard model found by name under the search
-//! dirs (e.g. Homebrew's `share/ae/models`). If nothing loads, callers use the
-//! hash fallback (see [`super::default_embedder`]). ONNX Runtime is statically
-//! linked by default, or `dlopen`ed at runtime under the `ort-load-dynamic`
-//! feature (Homebrew) — see [`ensure_ort_dylib`].
+//! Resolution when no explicit `--model` is requested: `$AE_MODEL_DIR` (a local
+//! dir holding `model.onnx` + `tokenizer.json`) → the model fetched from the
+//! HuggingFace Hub into the shared cache (`~/.cache/huggingface/hub`). If
+//! nothing loads (offline + uncached), callers use the hash fallback (see
+//! [`super::default_embedder`]). ONNX Runtime is statically linked by default,
+//! or `dlopen`ed at runtime under the `ort-load-dynamic` feature (Homebrew) —
+//! see [`ensure_ort_dylib`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -25,14 +23,11 @@ use super::Embedder;
 const NATIVE_DIMS: usize = 384;
 /// Cap sequence length — short jargon phrases never need the full context.
 const MAX_SEQ: usize = 256;
-/// The model `ae` looks for by name when nothing else is configured (matches
-/// `build.rs` and the Homebrew install dir).
-const DEFAULT_MODEL_NAME: &str = "all-MiniLM-L6-v2-quantized";
-
-#[cfg(feature = "bundled-model")]
-const BUNDLED_MODEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/model.onnx"));
-#[cfg(feature = "bundled-model")]
-const BUNDLED_TOKENIZER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tokenizer.json"));
+/// Default model on the HuggingFace Hub (ONNX int8-quantized export of
+/// all-MiniLM-L6-v2). Override with `--model <dir | .onnx | org/name>`.
+const DEFAULT_HF_REPO: &str = "Xenova/all-MiniLM-L6-v2";
+const HF_MODEL_FILE: &str = "onnx/model_quantized.onnx";
+const HF_TOKENIZER_FILE: &str = "tokenizer.json";
 
 pub struct OnnxEmbedder {
     session: Mutex<Session>,
@@ -57,26 +52,13 @@ impl OnnxEmbedder {
             };
         }
 
-        // No explicit request — resolve in order of specificity:
-        //   $AE_MODEL_DIR → bundled bytes → build-time cache → installed default.
+        // No explicit request: an explicit local dir, else the HuggingFace Hub
+        // (shared cache), else the hash fallback.
         if let Some(dir) = std::env::var_os("AE_MODEL_DIR") {
             let dir = PathBuf::from(dir);
             return Self::from_files(&dir.join("model.onnx"), &dir.join("tokenizer.json"));
         }
-        if let Some(e) = bundled() {
-            return Some(e);
-        }
-        if let Some(baked) = option_env!("AE_MODEL_DIR") {
-            let baked = PathBuf::from(baked);
-            if let Some(e) =
-                Self::from_files(&baked.join("model.onnx"), &baked.join("tokenizer.json"))
-            {
-                return Some(e);
-            }
-        }
-        // Sane default: the standard model, installed under a known search dir
-        // (e.g. Homebrew's `share/ae/models/<name>`).
-        let (model, tokenizer) = find_named(DEFAULT_MODEL_NAME)?;
+        let (model, tokenizer) = fetch_from_hub(DEFAULT_HF_REPO)?;
         Self::from_files(&model, &tokenizer)
     }
 
@@ -163,24 +145,11 @@ fn build_session(model: &[u8]) -> ort::Result<Session> {
         .commit_from_memory(model)
 }
 
-/// The model baked into the binary, if compiled with the `bundled-model`
-/// feature and the asset was actually present at build time.
-fn bundled() -> Option<OnnxEmbedder> {
-    #[cfg(feature = "bundled-model")]
-    {
-        OnnxEmbedder::from_bytes(BUNDLED_MODEL, BUNDLED_TOKENIZER)
-    }
-    #[cfg(not(feature = "bundled-model"))]
-    {
-        None
-    }
-}
-
 /// Resolve a `--model` spec to a `(model.onnx, tokenizer.json)` pair.
 ///
-/// A path to a directory uses `<dir>/{model.onnx,tokenizer.json}`; a path to a
-/// `.onnx` file pairs it with a sibling `tokenizer.json`; anything else is a
-/// bare name looked up under the model search dirs.
+/// A directory uses `<dir>/{model.onnx,tokenizer.json}`; a `.onnx` file pairs
+/// with a sibling `tokenizer.json`; an `org/name` spec is fetched from the
+/// HuggingFace Hub. Anything else doesn't resolve.
 fn resolve(spec: &str) -> Option<(PathBuf, PathBuf)> {
     let path = Path::new(spec);
     if path.is_dir() {
@@ -190,24 +159,36 @@ fn resolve(spec: &str) -> Option<(PathBuf, PathBuf)> {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         return Some((path.to_path_buf(), dir.join("tokenizer.json")));
     }
-    find_named(spec)
-}
-
-/// Look up a model by `name` under the search dirs, returning its
-/// `(model.onnx, tokenizer.json)` if found.
-fn find_named(name: &str) -> Option<(PathBuf, PathBuf)> {
-    for base in search_dirs() {
-        let dir = base.join(name);
-        if has_model(&dir) {
-            return Some((dir.join("model.onnx"), dir.join("tokenizer.json")));
-        }
+    // A non-path `org/name` spec is a HuggingFace repo id (don't treat a
+    // mistyped/relative/absolute path as one).
+    if spec.contains('/')
+        && !spec.starts_with('.')
+        && !spec.starts_with('/')
+        && !spec.starts_with('~')
+    {
+        return fetch_from_hub(spec);
     }
     None
 }
 
-/// True if `dir` holds both a model and a tokenizer.
-fn has_model(dir: &Path) -> bool {
-    dir.join("model.onnx").is_file() && dir.join("tokenizer.json").is_file()
+/// Fetch `<repo>`'s ONNX model + tokenizer from the HuggingFace Hub into the
+/// shared cache (`~/.cache/huggingface/hub`, honoring `HF_HOME`), returning
+/// their local paths. `None` on any error (offline + uncached → hash fallback).
+fn fetch_from_hub(repo: &str) -> Option<(PathBuf, PathBuf)> {
+    use hf_hub::api::sync::Api;
+    let api = Api::new()
+        .map_err(|e| log::warn!("HuggingFace Hub init failed: {e}"))
+        .ok()?;
+    let repo = api.model(repo.to_string());
+    let model = repo
+        .get(HF_MODEL_FILE)
+        .map_err(|e| log::warn!("model fetch failed: {e}"))
+        .ok()?;
+    let tokenizer = repo
+        .get(HF_TOKENIZER_FILE)
+        .map_err(|e| log::warn!("tokenizer fetch failed: {e}"))
+        .ok()?;
+    Some((model, tokenizer))
 }
 
 /// Under the load-dynamic strategy, ONNX Runtime is `dlopen`ed at runtime from
@@ -244,37 +225,6 @@ fn ensure_ort_dylib() {
             unsafe { std::env::set_var("ORT_DYLIB_PATH", dir.join(lib)) };
         }
     }
-}
-
-/// Directories searched for a named model, in priority order: `$AE_MODELS_DIR`,
-/// the user cache, then explicit Homebrew share dirs, and finally a dir relative
-/// to the executable (a generic guess, so it's the last resort).
-fn search_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(d) = std::env::var_os("AE_MODELS_DIR") {
-        dirs.push(PathBuf::from(d));
-    }
-    let cache_base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    dirs.push(cache_base.join("ae").join("models"));
-
-    // A Homebrew-installed model lives under <prefix>/share/ae/models.
-    if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX") {
-        dirs.push(PathBuf::from(prefix).join("share/ae/models"));
-    }
-    dirs.push(PathBuf::from("/opt/homebrew/share/ae/models"));
-    dirs.push(PathBuf::from("/usr/local/share/ae/models"));
-
-    // Last resort: relative to the binary (catches non-standard brew prefixes
-    // like Linuxbrew, but unlikely to exist otherwise).
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        dirs.push(dir.join("../share/ae/models"));
-    }
-    dirs
 }
 
 /// Mean-pool `[1, seq, hidden]` token embeddings, weighted by the attention

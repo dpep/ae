@@ -1,17 +1,15 @@
 [package]
-name = "ae"
-version = "0.2.0"
+name = "acronym-engine"
+version = "0.3.0"
 edition = "2024"
 description = "Acronym Engine — real-time acronym expansion and definition extraction."
 license = "MIT"
+repository = "https://github.com/dpep/ae"
 
+# Published as `acronym-engine`; the binary is `ae`.
 [[bin]]
 name = "ae"
 path = "src/main.rs"
-
-[lib]
-name = "ae"
-path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
@@ -24,17 +22,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 ort = { version = "=2.0.0-rc.12", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+# The embedding model is fetched on first use from the HuggingFace Hub into the
+# shared cache (~/.cache/huggingface/hub), so it's reused across tools and no
+# longer downloaded at build time. `online` = the sync (ureq) client; no tokio.
+hf-hub = { version = "0.3", default-features = false, features = ["online"] }
 
 [features]
-# Default favors fast iteration: load the model externally from the build-time
-# cache (no 22 MB `include_bytes!`) and statically link a downloaded ONNX
-# Runtime. Add `--features bundled-model` for the self-contained release artifact.
 default = ["ort-download"]
-
-# Bake the embedding model into the binary — one self-contained file, at the cost
-# of a bigger artifact and slower link. Opt-in (release/standalone distribution);
-# the default loads the model externally from the build-time cache.
-bundled-model = []
 
 # ONNX Runtime loading strategy (pick exactly one):
 #   ort-download     — download + statically link a prebuilt ORT at build time
@@ -47,8 +41,7 @@ ort-download = [
 ort-load-dynamic = ["ort/std", "ort/ndarray", "ort/tracing", "ort/load-dynamic", "ort/api-24"]
 
 # Release builds (Homebrew, CI `--release`) optimize for a small single binary:
-# strip symbols/debug info and let LTO + one codegen unit drop dead code. The
-# bundled model still dominates size, but this trims the code/runtime bloat.
+# strip symbols/debug info and let LTO + one codegen unit drop dead code.
 [profile.release]
 strip = true
 lto = true

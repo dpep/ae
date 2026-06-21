@@ -66,17 +66,17 @@ and an idle Leader cleans itself up.
 ## Install
 
 ```sh
-make install   # → ~/.cargo/bin/ae
-make bundle    # standalone: model baked into one self-contained file
+brew install dpep/tools/ae   # binary `ae`
+cargo install acronym-engine # same binary, from crates.io
+make install                 # from a source checkout → ~/.cargo/bin/ae
 ```
 
-The embedding model is fetched once at build time into a user cache (`~/.cache/ae`,
-reused across rebuilds — never committed). Everything loads it **externally** from
-that cache by default (smaller, faster compiles — and how `ae` ships via
-Homebrew). `make bundle` (or `--features bundled-model`) is the special case that
-**bakes it into the binary** for a single self-contained file you can hand to
-another machine. Offline builds still work — they fall back to a deterministic
-hash embedder.
+The embedding model is fetched **on first use** from the HuggingFace Hub into the
+shared cache (`~/.cache/huggingface/hub`, honoring `$HF_HOME`) — never committed,
+never downloaded at build time, and reused across any tool that pulls the same
+model. Point `ae` elsewhere with `--model <dir | .onnx | org/name>` or pin a local
+copy via `$AE_MODEL_DIR`. If nothing loads (offline and uncached), `ae` falls back
+to a deterministic hash embedder so it still runs.
 
 ## Usage
 
@@ -189,10 +189,10 @@ untrusted or high-volume input — it expands known acronyms without ever writin
 to the dictionary.
 
 `--model` lets you point at any compatible model — an absolute/relative path to a
-model directory or `.onnx` file, or a bare name resolved against the model search
-dirs (`$AE_MODELS_DIR`, the user cache, `<bin>/../share/ae/models`). With no
-flag, `ae` uses the bundled (or cached) model, and falls back to the hash
-embedder if none loads.
+model directory or `.onnx` file, or a HuggingFace `org/name` repo id (fetched into
+the shared Hub cache). With no flag, `ae` uses the default model from the Hub
+(`$AE_MODEL_DIR` overrides with a local copy), and falls back to the hash embedder
+if none loads.
 
 ## How it works
 
