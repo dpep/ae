@@ -91,8 +91,6 @@ pub const DEFAULT_DICTIONARY: &[(&str, &str)] = &[
     ("KPI", "Key Performance Indicator"),
     ("API", "Application Programming Interface"),
     ("CLI", "Command Line Interface"),
-    ("UDS", "Unix Domain Socket"),
-    ("MRL", "Matryoshka Representation Learning"),
     ("LLM", "Large Language Model"),
     ("RAM", "Random Access Memory"),
 ];
