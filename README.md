@@ -31,16 +31,16 @@ Validity asks whether the expansion is real; confidence asks whether it's right 
 ae's real interface is a pipe: send text on stdin, read structured JSON on stdout — `-j` for a pretty object, `-J` for NDJSON:
 
 ```sh
-$ printf 'ship the MVP this sprint' | ae -j
+$ printf 'ship the OKR review this sprint' | ae -j
 {
-  "sentence": "ship the MVP this sprint",
+  "sentence": "ship the OKR review this sprint",
   "expansions": [
     {
-      "acronym": "MVP",
-      "text_slice": "MVP",
+      "acronym": "OKR",
+      "text_slice": "OKR",
       "matches": [
         {
-          "expansion": "minimum viable product",
+          "expansion": "Objectives and Key Results",
           "validity": 1.0,
           "confidence": 0.5
         }

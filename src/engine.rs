@@ -627,6 +627,26 @@ mod tests {
     }
 
     #[test]
+    fn unknown_acronym_fixtures_stay_unseeded() {
+        // These acronyms are used across the candidate/mining tests as
+        // genuinely-unknown tokens (MVP for its dual meaning + prefix variants,
+        // PBJ/POC for filler-word mining). If one ever lands in the seed
+        // dictionary it would expand instead of being flagged/mined, silently
+        // breaking ~dozens of tests — which is exactly what happened when MVP
+        // was briefly seeded. Guard against it.
+        let seeded: std::collections::HashSet<&str> = crate::store::DEFAULT_DICTIONARY
+            .iter()
+            .map(|(a, _)| *a)
+            .collect();
+        for token in ["MVP", "XYZ", "PBJ", "POC"] {
+            assert!(
+                !seeded.contains(token),
+                "{token} is seeded — it's used as an unknown fixture in the tests"
+            );
+        }
+    }
+
+    #[test]
     fn an_inline_defined_acronym_is_learned_not_unknown() {
         let e = Engine::in_memory().unwrap();
         let out = e.analyze("see the PDP (Product Detail Page)").unwrap();
