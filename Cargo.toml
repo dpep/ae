@@ -24,8 +24,11 @@ ort = { version = "=2.0.0-rc.12", default-features = false }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # The embedding model is fetched on first use from the HuggingFace Hub into the
 # shared cache (~/.cache/huggingface/hub), so it's reused across tools and no
-# longer downloaded at build time. `online` = the sync (ureq) client; no tokio.
-hf-hub = { version = "0.3", default-features = false, features = ["online"] }
+# longer downloaded at build time. `ureq` = the sync client; no tokio. 0.5 is
+# the first release that follows the Hub's relative `Location` redirects, which
+# 0.3/0.4 mis-parsed (RelativeUrlWithoutBase) when fetching non-LFS files like
+# tokenizer.json.
+hf-hub = { version = "0.5", default-features = false, features = ["ureq"] }
 
 [features]
 default = ["ort-download"]

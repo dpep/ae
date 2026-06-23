@@ -1,10 +1,11 @@
 //! Text embedding behind a trait, with two implementations.
 //!
 //! [`OnnxEmbedder`] runs the real `all-MiniLM-L6-v2` model (int8-quantized
-//! ONNX, fetched at build time — see `build.rs`) via ONNX Runtime. It's the
-//! default when the model is present. [`HashEmbedder`] is a deterministic,
-//! dependency-free feature-hash fallback used when the model can't be loaded
-//! (offline build, missing asset) and in unit tests that need reproducibility.
+//! ONNX, fetched from the HuggingFace Hub on first use — see [`onnx`]) via ONNX
+//! Runtime. It's the default when the model loads. [`HashEmbedder`] is a
+//! deterministic, dependency-free feature-hash fallback used when the model
+//! can't be loaded (offline + uncached, missing asset) and in unit tests that
+//! need reproducibility.
 //!
 //! Both yield a native-width vector that the MRL pipeline truncates to 64 dims;
 //! the trait deliberately does *not* fix the width, since the implementations
@@ -35,7 +36,14 @@ pub fn default_embedder(model: Option<&str>) -> Box<dyn Embedder> {
             Box::new(e)
         }
         None => {
-            log::debug!("ONNX model unavailable; using hash embedder");
+            // The ONNX model (or its tokenizer) didn't load — surface it once,
+            // clearly, since semantic matching is degraded until it's fixed. The
+            // underlying cause is logged at debug (run with -v / RUST_LOG=debug).
+            log::warn!(
+                "embedding model unavailable — using the built-in hash fallback \
+                 (reduced semantic accuracy). Pass --model <dir|.onnx|org/name>, \
+                 or run with -v to see why the model didn't load."
+            );
             Box::new(HashEmbedder::new())
         }
     }

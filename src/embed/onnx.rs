@@ -46,7 +46,7 @@ impl OnnxEmbedder {
             return match resolve(spec).and_then(|(m, t)| Self::from_files(&m, &t)) {
                 Some(e) => Some(e),
                 None => {
-                    log::warn!("--model {spec}: could not load; using hash embedder");
+                    log::debug!("--model {spec}: could not load");
                     None
                 }
             };
@@ -73,10 +73,10 @@ impl OnnxEmbedder {
             return None; // empty placeholder from an offline bundled build
         }
         let tokenizer = Tokenizer::from_bytes(tokenizer)
-            .map_err(|e| log::warn!("tokenizer load failed: {e}"))
+            .map_err(|e| log::debug!("tokenizer load failed: {e}"))
             .ok()?;
         let session = build_session(model)
-            .map_err(|e| log::warn!("ONNX session load failed: {e}"))
+            .map_err(|e| log::debug!("ONNX session load failed: {e}"))
             .ok()?;
         Some(Self {
             session: Mutex::new(session),
@@ -177,16 +177,16 @@ fn resolve(spec: &str) -> Option<(PathBuf, PathBuf)> {
 fn fetch_from_hub(repo: &str) -> Option<(PathBuf, PathBuf)> {
     use hf_hub::api::sync::Api;
     let api = Api::new()
-        .map_err(|e| log::warn!("HuggingFace Hub init failed: {e}"))
+        .map_err(|e| log::debug!("HuggingFace Hub init failed: {e}"))
         .ok()?;
     let repo = api.model(repo.to_string());
     let model = repo
         .get(HF_MODEL_FILE)
-        .map_err(|e| log::warn!("model fetch failed: {e}"))
+        .map_err(|e| log::debug!("model fetch failed: {e}"))
         .ok()?;
     let tokenizer = repo
         .get(HF_TOKENIZER_FILE)
-        .map_err(|e| log::warn!("tokenizer fetch failed: {e}"))
+        .map_err(|e| log::debug!("tokenizer fetch failed: {e}"))
         .ok()?;
     Some((model, tokenizer))
 }

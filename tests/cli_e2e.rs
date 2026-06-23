@@ -134,6 +134,13 @@ fn model_flag_is_accepted_and_degrades_gracefully() {
     assert!(out.success, "stderr: {}", out.stderr);
     let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(v["expansions"][0]["acronym"], "OKR");
+    // The fallback is announced once, clearly, on stderr so it's fixable — and
+    // never pollutes stdout (which stays clean JSON, parsed above).
+    assert!(
+        out.stderr.contains("hash fallback"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
