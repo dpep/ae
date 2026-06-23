@@ -1,6 +1,6 @@
 [package]
 name = "acronym-engine"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "Acronym Engine — real-time acronym expansion and definition extraction."
 license = "MIT"
