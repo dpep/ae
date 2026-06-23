@@ -210,7 +210,7 @@ Representation Learning**: the 384-d vector is truncated to its first 64
 coordinates and L2-normalized, shrinking the vector store ~6×. See
 [docs/SPEC.md](docs/SPEC.md) for the full design and
 [docs/ROADMAP.md](docs/ROADMAP.md) for status and deliberate deviations (notably
-the model choice and the build-time fetch-and-bundle strategy).
+the model choice and the runtime model-fetch strategy).
 
 ## Development
 

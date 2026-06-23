@@ -40,12 +40,13 @@ Rust, single static binary. `rusqlite` (bundled SQLite, WAL) for storage,
 `ort` (ONNX Runtime, statically linked) + `tokenizers` for embeddings.
 
 The embedding model (`all-MiniLM-L6-v2`, int8-quantized ONNX) is **not in the
-repo** — `build.rs` fetches it at build time into `~/.cache/ae` (reused across
-builds). The default loads it externally from that cache (smaller, faster-
-compiling — optimized for iteration); add `--features bundled-model` to bake it
-into one self-contained binary for a standalone release artifact. Offline builds
-fall back to the deterministic `HashEmbedder`. Never commit a model artifact
-(`.gitignore` blocks `*.onnx`).
+repo** and **not fetched at build time** — `ae` acquires it on first use from
+the HuggingFace Hub (via `hf-hub`) into the shared cache
+(`~/.cache/huggingface/hub`, honoring `$HF_HOME`), reused across tools so
+`cargo install` / `cargo publish` never download it. Resolution is
+`$AE_MODEL_DIR` (a local dir) → HF Hub → the deterministic `HashEmbedder`
+(offline / uncached fallback). Never commit a model artifact (`.gitignore`
+blocks `*.onnx`).
 
 This machine's Rust came via Homebrew's keg-only `rustup`, so `cargo` may not be
 on `PATH`. Either add it once —
@@ -61,7 +62,6 @@ echo 'export PATH="/opt/homebrew/opt/rustup/bin:$PATH"' >> ~/.bash_profile
 ```text
 ae/
   Cargo.toml
-  build.rs       ← fetch/cache + (optionally) stage the embedding model
   src/
     main.rs      ← thin entry → cli::run()
     lib.rs       ← module wiring
@@ -86,20 +86,19 @@ Keep it a single crate until there's a concrete reason to split.
 ## Building, testing, linting
 
 ```sh
-make build                  # dev build (external model) → target/debug/ae
+make build                  # dev build → target/debug/ae
 cargo run -- "KPI (Key Performance Indicator)"
-make test                   # unit + integration tests (external model)
+make test                   # unit + integration tests
 make lint                   # fmt --check + clippy (warnings = errors)
 cargo fmt                    # format — run before committing
 ```
 
-Dev/test use `--no-default-features --features ort-download` (external model,
-still a statically-linked downloaded ONNX Runtime) for speed — prefer the `make`
-targets, which set it. This now matches the default feature set, so a bare
-`cargo build` is also external-model/fast. Homebrew builds with `--features
-ort-load-dynamic` (dlopen the keg's ORT). CI lints/tests in dev mode and does a
-`--release --features bundled-model` build to prove the single-binary path
-compiles.
+Dev/test use `--no-default-features --features ort-download` (a statically-
+linked, downloaded ONNX Runtime) for speed — prefer the `make` targets, which
+set it. This matches the default feature set, so a bare `cargo build` is also
+fast. Homebrew builds with `--features ort-load-dynamic` (dlopen the keg's ORT).
+CI lints/tests in dev mode and does a `--release` build to prove the single
+static binary compiles.
 
 Before committing: `cargo fmt && cargo clippy --all-targets --no-default-features
 --features ort-download -- -D warnings && cargo test --no-default-features

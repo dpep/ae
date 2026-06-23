@@ -52,9 +52,9 @@ commit.
 - [x] `Embedder` trait; deterministic `HashEmbedder` fallback
 - [x] real ONNX embedder (`all-MiniLM-L6-v2`, int8-quantized) via ONNX Runtime —
       tokenize → mean-pool → MRL-compress; statically linked
-- [x] model fetched at build time into a reused user cache (`build.rs`), never
-      committed; `bundled-model` feature bakes it into one self-contained binary
-      (default), or load externally with `--no-default-features`
+- [x] model fetched on first use from the HuggingFace Hub into the shared
+      `~/.cache/huggingface/hub` (via `hf-hub`), never committed and never
+      fetched at build time; resolution is `$AE_MODEL_DIR` → Hub → hash fallback
 - [x] `--model <path|name>` override; resolution order, named search dirs
 - [x] tests: trie insert/scan, mean-pool, model resolution, real-model semantic
       similarity (gated on model presence)
@@ -82,9 +82,9 @@ commit.
    fallback.
 
 2. **"Quantize and shrink" = fetch the upstream int8 export.** Running a real
-   quantizer at build time needs Python's onnxruntime tooling, which we won't
-   add as a build dependency. Downloading the already-quantized artifact gives
-   the same size win without it.
+   quantizer ourselves needs Python's onnxruntime tooling, which we won't take
+   on as a dependency. Fetching the already-quantized artifact gives the same
+   size win without it.
 
 3. **Vectors live in a plain `acronym_contexts` table, not a `vec0` virtual
    table.** `sqlite-vec`'s `vec0` needs a loadable extension that `rusqlite`'s
@@ -242,8 +242,8 @@ candidate).
 - [ ] Bump `MRL_DIMS` to 128 (better disambiguation for the non-MRL model).
 - [ ] `ae --add ACR "Expansion"` to seed the dictionary from the CLI.
 - [ ] Confidence calibration for learned candidates from real corpora.
-- [ ] Homebrew: validate the formula's ONNX-Runtime + bundled-model build on a
-      clean machine (sandbox network constraints).
+- [ ] Homebrew: validate the formula's ONNX-Runtime (load-dynamic) build and
+      first-run model fetch on a clean machine (sandbox network constraints).
 
 ## Known bugs
 
