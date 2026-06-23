@@ -11,7 +11,7 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,9 @@ use crate::types::AnalysisPayload;
 /// via `AE_IDLE_SECS` (tests use a short value).
 const DEFAULT_IDLE_SECS: u64 = 300;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
+/// How long graceful shutdown waits for in-flight requests before exiting
+/// anyway, so a hung client can't keep the daemon alive forever.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "op", rename_all = "lowercase")]
@@ -153,6 +156,11 @@ pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result
 /// told to stop or the janitor times out. Returns early (without error) if the
 /// lock is already held — another Leader won the election.
 pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
+    // Snapshot our binary's identity up front — before binding the socket or the
+    // slower engine load advertise readiness — so an upgrade that lands during
+    // startup is still seen as a change, not baked into the baseline.
+    let exe = exe_fingerprint();
+
     let lock_file = File::create(lock_path(socket))?;
     if lock_file.try_lock_exclusive().is_err() {
         log::info!("another leader holds the lock; exiting");
@@ -168,10 +176,22 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     let engine = Arc::new(Mutex::new(Engine::open(db, model).map_err(to_io)?));
     let active = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let shutdown = Arc::new(AtomicBool::new(false));
 
-    spawn_janitor(socket.to_path_buf(), active.clone(), last_activity.clone());
+    spawn_janitor(
+        socket.to_path_buf(),
+        active.clone(),
+        last_activity.clone(),
+        shutdown.clone(),
+        exe,
+    );
 
     for stream in listener.incoming() {
+        // A shutdown trigger wakes this blocking accept with a throwaway
+        // self-connection; observing the flag, we stop taking new work.
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
@@ -182,23 +202,63 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
         let engine = engine.clone();
         let active = active.clone();
         let last = last_activity.clone();
+        let shutdown = shutdown.clone();
         let sock = socket.to_path_buf();
         std::thread::spawn(move || {
             active.fetch_add(1, Ordering::SeqCst);
-            if let Err(e) = handle_connection(stream, &engine, &sock) {
+            if let Err(e) = handle_connection(stream, &engine, &sock, &shutdown) {
                 log::warn!("connection error: {e}");
             }
             active.fetch_sub(1, Ordering::SeqCst);
             *last.lock().unwrap() = Instant::now();
         });
     }
+
+    // Graceful shutdown: unlink the socket so new callers self-heal in-process,
+    // then let in-flight requests finish before we drop the engine and exit
+    // (which releases the lock). Bounded by DRAIN_TIMEOUT.
+    let _ = std::fs::remove_file(socket);
+    drain(&active);
+    log::info!("leader stopped");
     Ok(())
+}
+
+/// Block until all in-flight connections finish, or [`DRAIN_TIMEOUT`] elapses.
+fn drain(active: &AtomicUsize) {
+    let deadline = Instant::now() + DRAIN_TIMEOUT;
+    while active.load(Ordering::SeqCst) > 0 {
+        if Instant::now() >= deadline {
+            log::warn!("drain timed out with requests still in flight; exiting");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Begin graceful shutdown: raise the flag, then wake the (blocking) accept loop
+/// with a throwaway self-connection so it observes the flag promptly.
+fn trigger_shutdown(shutdown: &AtomicBool, socket: &Path) {
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = UnixStream::connect(socket);
+}
+
+/// A best-effort identity for the running binary. Replacing the executable on
+/// disk (upgrade, reinstall, `cargo build`) changes its inode, length, or mtime,
+/// so a Leader can notice it's stale and step down. `None` if it can't be read.
+fn exe_fingerprint() -> Option<(u64, u64, std::time::SystemTime)> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::env::current_exe().ok()?;
+    let md = std::fs::metadata(&path).ok()?;
+    let fp = (md.ino(), md.len(), md.modified().ok()?);
+    log::debug!("exe fingerprint: {path:?} -> {fp:?}");
+    Some(fp)
 }
 
 fn handle_connection(
     mut stream: UnixStream,
     engine: &Mutex<Engine>,
     socket: &Path,
+    shutdown: &AtomicBool,
 ) -> io::Result<()> {
     let req: Request = serde_json::from_slice(&read_frame(&mut stream)?)?;
     match req {
@@ -224,28 +284,47 @@ fn handle_connection(
         }
         Request::Ping => write_frame(&mut stream, b"\x01")?,
         Request::Stop => {
+            // Ack first so the client returns promptly, then drain in the
+            // background instead of hard-exiting mid-request.
             write_frame(&mut stream, b"\x01")?;
-            log::info!("stop requested; shutting down");
-            let _ = std::fs::remove_file(socket);
-            std::process::exit(0);
+            log::info!("stop requested; draining and shutting down");
+            trigger_shutdown(shutdown, socket);
         }
     }
     Ok(())
 }
 
-/// Watchdog: once no connection has been active for [`idle_timeout`], remove the
-/// socket and exit. Re-armed by the activity timestamp every connection updates.
-fn spawn_janitor(socket: PathBuf, active: Arc<AtomicUsize>, last: Arc<Mutex<Instant>>) {
+/// Watchdog: trigger a graceful shutdown when the daemon has been idle past
+/// [`idle_timeout`], or when its own binary has been replaced on disk (so the
+/// next call spawns a Leader running the new code). Idle is re-armed by the
+/// activity timestamp every connection updates.
+fn spawn_janitor(
+    socket: PathBuf,
+    active: Arc<AtomicUsize>,
+    last: Arc<Mutex<Instant>>,
+    shutdown: Arc<AtomicBool>,
+    exe: Option<(u64, u64, std::time::SystemTime)>,
+) {
     let timeout = idle_timeout();
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(500));
+            if shutdown.load(Ordering::SeqCst) {
+                return; // shutdown already under way (e.g. via --stop)
+            }
+            // Stale binary: step down so an upgrade/reinstall/rebuild takes
+            // effect. Only acts when we have a baseline to compare against.
+            if exe.is_some() && exe_fingerprint() != exe {
+                log::info!("binary changed on disk; shutting down to refresh");
+                trigger_shutdown(&shutdown, &socket);
+                return;
+            }
             let idle = active.load(Ordering::SeqCst) == 0;
             let elapsed = last.lock().unwrap().elapsed();
             if idle && elapsed >= timeout {
                 log::info!("idle for {:?}; shutting down", elapsed);
-                let _ = std::fs::remove_file(&socket);
-                std::process::exit(0);
+                trigger_shutdown(&shutdown, &socket);
+                return;
             }
         }
     });

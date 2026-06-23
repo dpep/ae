@@ -145,6 +145,65 @@ fn idle_daemon_reaps_itself() {
 }
 
 #[test]
+fn daemon_steps_down_when_its_binary_is_replaced() {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let exe = dir.join(format!("ae-copy-{pid}"));
+    let sock = dir.join(format!("ae-replace-{pid}.sock"));
+    let db = dir.join(format!("ae-replace-{pid}.db"));
+    let rm_all = || {
+        for p in [&exe, &sock, &db, &sock.with_extension("lock")] {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    rm_all();
+
+    // Run the daemon from a copy of the test binary so we can replace it on
+    // disk. A high idle timeout means only a binary swap can reap it.
+    std::fs::copy(bin(), &exe).unwrap();
+    let out = Command::new(&exe)
+        .arg("--daemon")
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--db")
+        .arg(&db)
+        .env("AE_IDLE_SECS", "3600")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && connectable(&sock),
+        "daemon failed to start: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Replace the executable the way an upgrade does: write a fresh file and
+    // atomically rename over it (new inode/mtime; rename sidesteps ETXTBSY on
+    // the running binary). The janitor should notice and step down.
+    let next = dir.join(format!("ae-copy-next-{pid}"));
+    std::fs::copy(bin(), &next).unwrap();
+    std::fs::rename(&next, &exe).unwrap();
+
+    let stepped_down = wait_until(Duration::from_secs(3), || !connectable(&sock));
+    // Best-effort: stop it if the assertion is about to fail, so a stuck daemon
+    // doesn't linger for the full idle hour.
+    if !stepped_down {
+        let _ = Command::new(&exe)
+            .arg("--stop")
+            .arg("--socket")
+            .arg(&sock)
+            .output();
+    }
+    assert!(
+        stepped_down,
+        "daemon did not step down after its binary was replaced"
+    );
+    rm_all();
+}
+
+#[test]
 fn stop_without_a_daemon_is_harmless() {
     let sock = scratch_socket("nostop");
     let (ok, msg) = run(&sock, &["--stop"], "30");
