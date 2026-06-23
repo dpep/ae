@@ -1,7 +1,7 @@
 # ae development conventions
 
 `ae` (Acronym Engine) is an ultra-lightweight, local-first CLI + background
-service for real-time acronym expansion and definition extraction. Read
+service for acronym expansion and definition extraction. Read
 [README.md](README.md) for the pitch, [docs/SPEC.md](docs/SPEC.md) for the
 design contract, and [docs/ROADMAP.md](docs/ROADMAP.md) for what ships when and
 why anything deviates from the spec.
