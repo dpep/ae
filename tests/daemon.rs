@@ -204,6 +204,41 @@ fn daemon_steps_down_when_its_binary_is_replaced() {
 }
 
 #[test]
+fn status_reports_running_state_and_details() {
+    let sock = scratch_socket("status");
+
+    // No daemon: --status exits non-zero and reports not running.
+    let (up0, body0) = run(&sock, &["--status", "-j"], "30");
+    assert!(!up0, "status should exit non-zero with no daemon: {body0}");
+    let v0: serde_json::Value = serde_json::from_str(&body0).unwrap();
+    assert_eq!(v0["running"], false);
+
+    // Start one, then --status exits zero and surfaces version + embedder + pid.
+    assert!(run(&sock, &["--daemon"], "30").0);
+    let (up, body) = run(&sock, &["--status", "-j"], "30");
+    assert!(up, "status should exit zero while a daemon is up: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["running"], true);
+    assert!(v["version"].is_string());
+    assert!(v["pid"].is_number());
+    assert!(v["embedder"].is_string()); // "onnx" or "hash" depending on the model
+
+    // --status must not have started or stopped anything.
+    assert!(connectable(&sock), "status probe disturbed the daemon");
+
+    // -q is a silent health check: no output, exit code still reflects state.
+    let (up_q, body_q) = run(&sock, &["--status", "-q"], "30");
+    assert!(
+        up_q && body_q.is_empty(),
+        "quiet status should be silent + zero: {body_q:?}"
+    );
+
+    assert!(run(&sock, &["--stop"], "30").0);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    cleanup(&sock);
+}
+
+#[test]
 fn stop_without_a_daemon_is_harmless() {
     let sock = scratch_socket("nostop");
     let (ok, msg) = run(&sock, &["--stop"], "30");

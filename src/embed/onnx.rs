@@ -132,6 +132,10 @@ impl OnnxEmbedder {
 }
 
 impl Embedder for OnnxEmbedder {
+    fn kind(&self) -> &'static str {
+        "onnx"
+    }
+
     fn embed(&self, text: &str) -> Vec<f32> {
         self.run(text).unwrap_or_else(|| vec![0.0; NATIVE_DIMS])
     }

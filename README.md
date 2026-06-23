@@ -180,7 +180,10 @@ Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. stdin (when
 piped) wins; otherwise the positional `TEXT` is used; with nothing to do, `ae`
 prints help. stdout carries only data — all logs go to stderr, so `ae … | jq` is
 always safe. Every command is machine-friendly: `-j`/`-J` work everywhere, and
-`--daemon`/`--stop` emit a `{"status": …}` object in those modes.
+`--daemon`/`--stop` emit a `{"status": …}` object in those modes. `ae --status`
+reports a running daemon's version, embedder, and uptime (read-only — it never
+starts one), and exits non-zero when none is up, so `--status -q` is a silent
+health check.
 
 `--batch` (or `--file`/`cat file | ae -b`) scans input line by line and
 aggregates the findings, each tagged with its `line:col` position — grep-style in

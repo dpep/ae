@@ -19,7 +19,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::Engine;
-use crate::types::AnalysisPayload;
+use crate::types::{AnalysisPayload, StatusPayload};
 
 /// Default idle window before a clientless daemon shuts itself down. Overridable
 /// via `AE_IDLE_SECS` (tests use a short value).
@@ -40,6 +40,7 @@ enum Request {
     },
     Stop,
     Ping,
+    Status,
 }
 
 /// Result of asking the OS to start a daemon.
@@ -115,6 +116,17 @@ pub fn stop(socket: &Path) -> io::Result<bool> {
     }
 }
 
+/// Query a running Leader's status. `Ok(Some(_))` if one answered; `Ok(None)` if
+/// none is running (unreachable socket). Read-only — never starts a daemon.
+pub fn status(socket: &Path) -> io::Result<Option<StatusPayload>> {
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return Ok(None);
+    };
+    write_frame(&mut stream, &serde_json::to_vec(&Request::Status).unwrap())?;
+    let resp = read_frame(&mut stream)?;
+    Ok(Some(serde_json::from_slice(&resp)?))
+}
+
 /// Spawn a detached daemon process for `socket`, waiting until it accepts
 /// connections. A no-op (`AlreadyRunning`) if one is already up. `db` and
 /// `model` are forwarded so the daemon uses the same dictionary and embedder.
@@ -173,6 +185,7 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     let listener = UnixListener::bind(socket)?;
     log::info!("leader listening on {}", socket.display());
 
+    let started = Instant::now();
     let engine = Arc::new(Mutex::new(Engine::open(db, model).map_err(to_io)?));
     let active = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
@@ -206,7 +219,7 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
         let sock = socket.to_path_buf();
         std::thread::spawn(move || {
             active.fetch_add(1, Ordering::SeqCst);
-            if let Err(e) = handle_connection(stream, &engine, &sock, &shutdown) {
+            if let Err(e) = handle_connection(stream, &engine, &sock, &shutdown, started) {
                 log::warn!("connection error: {e}");
             }
             active.fetch_sub(1, Ordering::SeqCst);
@@ -259,6 +272,7 @@ fn handle_connection(
     engine: &Mutex<Engine>,
     socket: &Path,
     shutdown: &AtomicBool,
+    started: Instant,
 ) -> io::Result<()> {
     let req: Request = serde_json::from_slice(&read_frame(&mut stream)?)?;
     match req {
@@ -283,6 +297,16 @@ fn handle_connection(
             write_frame(&mut stream, &serde_json::to_vec(&payload)?)?;
         }
         Request::Ping => write_frame(&mut stream, b"\x01")?,
+        Request::Status => {
+            let status = StatusPayload {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                pid: std::process::id(),
+                uptime_secs: started.elapsed().as_secs(),
+                embedder: engine.lock().unwrap().embedder_kind().to_string(),
+                idle_timeout_secs: idle_timeout().as_secs(),
+            };
+            write_frame(&mut stream, &serde_json::to_vec(&status)?)?;
+        }
         Request::Stop => {
             // Ack first so the client returns promptly, then drain in the
             // background instead of hard-exiting mid-request.

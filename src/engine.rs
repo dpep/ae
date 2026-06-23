@@ -82,6 +82,12 @@ impl Engine {
         })
     }
 
+    /// Which embedder backs this engine: `"onnx"` (real model) or `"hash"`
+    /// (deterministic fallback). Surfaced by `ae --status`.
+    pub fn embedder_kind(&self) -> &'static str {
+        self.embedder.kind()
+    }
+
     /// A persistent engine backed by the database at `path`, seeded with the
     /// built-in dictionary on first use. `model` is an optional `--model`
     /// request; otherwise the best available embedder is chosen (see

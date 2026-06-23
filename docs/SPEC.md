@@ -87,8 +87,11 @@ Handle terminal argument parsing, separate standard logging pipelines from
 computational data pipelines, and intercept streaming inputs without deadlocking
 the process thread.
 
-- CLI struct: `text`, `--daemon`, `--stop`, `--format {human,json,ndjson}`,
-  `--socket`, `--verbose`.
+- CLI struct: `text`, `--daemon`, `--stop`, `--status`, `--format
+  {human,json,ndjson}`, `--socket`, `--verbose`.
+- `--status` probes the daemon read-only (never starts one) and reports its
+  version, pid, uptime, and active embedder; exits non-zero when none is up, so
+  `--status -q` is a silent health check.
 - Stream splitting: if stdin is not a TTY, read it to a string; else use the
   positional `text` argument; else error.
 - `stdout` stays pristine for data; logs go to `stderr` via `env_logger`.

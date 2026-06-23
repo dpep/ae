@@ -4,11 +4,12 @@
 //! `env_logger` (see [`crate::cli`]).
 
 use std::io::Write;
+use std::path::Path;
 
 use serde_json::json;
 
 use crate::cli::Format;
-use crate::types::AnalysisPayload;
+use crate::types::{AnalysisPayload, StatusPayload};
 
 /// Render `payload` to `out` in `format`.
 pub fn render(
@@ -161,6 +162,79 @@ pub fn render_suggestions(
         }
     }
     Ok(())
+}
+
+/// Render daemon status. `report` is `Some` when a daemon answered, `None` when
+/// none is running; `socket`/`db` are the paths the CLI resolved (what was
+/// checked). Honors the output format like every other command.
+pub fn render_status(
+    out: &mut impl Write,
+    report: Option<&StatusPayload>,
+    socket: &Path,
+    db: &Path,
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => match report {
+            Some(s) => {
+                writeln!(
+                    out,
+                    "ae: daemon running (pid {}, up {})",
+                    s.pid,
+                    fmt_uptime(s.uptime_secs)
+                )?;
+                writeln!(out, "  version    {}", s.version)?;
+                writeln!(out, "  embedder   {}", s.embedder)?;
+                writeln!(out, "  idle       {}s", s.idle_timeout_secs)?;
+                writeln!(out, "  socket     {}", socket.display())?;
+                writeln!(out, "  db         {}", db.display())?;
+            }
+            None => {
+                writeln!(out, "ae: no daemon running")?;
+                writeln!(out, "  socket     {}", socket.display())?;
+                writeln!(out, "  db         {}", db.display())?;
+            }
+        },
+        Format::Json => writeln!(
+            out,
+            "{}",
+            serde_json::to_string_pretty(&status_json(report, socket, db)).unwrap()
+        )?,
+        Format::Ndjson => writeln!(out, "{}", status_json(report, socket, db))?,
+    }
+    Ok(())
+}
+
+fn status_json(report: Option<&StatusPayload>, socket: &Path, db: &Path) -> serde_json::Value {
+    match report {
+        Some(s) => json!({
+            "running": true,
+            "version": s.version,
+            "pid": s.pid,
+            "uptime_secs": s.uptime_secs,
+            "embedder": s.embedder,
+            "idle_timeout_secs": s.idle_timeout_secs,
+            "socket": socket.display().to_string(),
+            "db": db.display().to_string(),
+        }),
+        None => json!({
+            "running": false,
+            "socket": socket.display().to_string(),
+            "db": db.display().to_string(),
+        }),
+    }
+}
+
+/// Human-friendly uptime: `45s`, `3m12s`, `2h05m`.
+fn fmt_uptime(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// One analyzed line of a batch run: its number, original text, and findings.
@@ -368,5 +442,50 @@ mod tests {
         let mut buf = Vec::new();
         render(&mut buf, &AnalysisPayload::empty("x"), Format::Human).unwrap();
         assert!(String::from_utf8(buf).unwrap().contains("No acronyms"));
+    }
+
+    fn status_sample() -> StatusPayload {
+        StatusPayload {
+            version: "9.9.9".into(),
+            pid: 4242,
+            uptime_secs: 75,
+            embedder: "onnx".into(),
+            idle_timeout_secs: 300,
+        }
+    }
+
+    fn status_rendered(report: Option<&StatusPayload>, format: Format) -> String {
+        let mut buf = Vec::new();
+        render_status(
+            &mut buf,
+            report,
+            Path::new("/tmp/ae.sock"),
+            Path::new("/tmp/ae.db"),
+            format,
+        )
+        .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn status_human_surfaces_version_and_embedder() {
+        let s = status_sample();
+        let out = status_rendered(Some(&s), Format::Human);
+        assert!(out.contains("running") && out.contains("9.9.9") && out.contains("onnx"));
+    }
+
+    #[test]
+    fn status_json_reflects_running_state() {
+        let s = status_sample();
+        let up: serde_json::Value =
+            serde_json::from_str(&status_rendered(Some(&s), Format::Json)).unwrap();
+        assert_eq!(up["running"], true);
+        assert_eq!(up["embedder"], "onnx");
+        assert_eq!(up["version"], "9.9.9");
+
+        let down: serde_json::Value =
+            serde_json::from_str(&status_rendered(None, Format::Json)).unwrap();
+        assert_eq!(down["running"], false);
+        assert_eq!(down["socket"], "/tmp/ae.sock");
     }
 }

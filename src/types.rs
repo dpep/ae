@@ -49,6 +49,20 @@ pub struct AnalysisPayload {
     pub candidates: Vec<String>,
 }
 
+/// What a running daemon reports for `ae --status`. CLI-side facts (whether a
+/// daemon answered at all, the socket/db paths checked) are added at render time.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct StatusPayload {
+    /// The daemon binary's version — confirms which code is actually serving
+    /// (e.g. after an upgrade-triggered self-refresh).
+    pub version: String,
+    pub pid: u32,
+    pub uptime_secs: u64,
+    /// `"onnx"` (real model loaded) or `"hash"` (degraded fallback).
+    pub embedder: String,
+    pub idle_timeout_secs: u64,
+}
+
 impl AnalysisPayload {
     /// An empty payload that still echoes the input it was derived from.
     pub fn empty(sentence: impl Into<String>) -> Self {

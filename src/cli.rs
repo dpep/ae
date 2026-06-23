@@ -54,6 +54,12 @@ pub struct Cli {
     #[arg(long)]
     pub stop: bool,
 
+    /// Report whether the background daemon is running — with its version,
+    /// embedder, and uptime. Read-only; never starts one. Exits non-zero when
+    /// no daemon is up.
+    #[arg(long)]
+    pub status: bool,
+
     /// JSON output: a pretty object (analysis) or `{"status": …}` (commands).
     #[arg(short = 'j', long, global = true, conflicts_with = "ndjson")]
     pub json: bool,
@@ -212,6 +218,10 @@ pub fn run() -> ExitCode {
             Ok(false) => status(fmt, cli.quiet, "not_running", "no daemon running"),
             Err(e) => fail(fmt, &format!("stop failed: {e}")),
         };
+    }
+
+    if cli.status {
+        return run_status(&cli, fmt);
     }
 
     // The batch/file path is a bulk in-process pass; `-d` just also warms a
@@ -391,6 +401,30 @@ pub fn determine_input(cli: &Cli) -> Result<String, String> {
         return Ok(trimmed);
     }
     Err("no input: pass text as an argument or pipe it via stdin".into())
+}
+
+/// Report daemon status to stdout, honoring the format. Read-only — probes the
+/// socket without starting anything. Exits non-zero when no daemon is up, so it
+/// doubles as a health check (`ae --status && …`).
+fn run_status(cli: &Cli, fmt: Format) -> ExitCode {
+    let report = ipc::status(&cli.socket).unwrap_or(None);
+    if !cli.quiet {
+        let stdout = io::stdout();
+        if let Err(e) = output::render_status(
+            &mut stdout.lock(),
+            report.as_ref(),
+            &cli.socket,
+            &cli.db_path(),
+            fmt,
+        ) {
+            return fail(fmt, &format!("render failed: {e}"));
+        }
+    }
+    if report.is_some() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// Run a dictionary management command against the `--db` store.

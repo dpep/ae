@@ -24,6 +24,10 @@ pub const EMBED_DIMS: usize = 384;
 /// Produces an embedding (length ≥ [`crate::mrl::MRL_DIMS`]) for a chunk of text.
 pub trait Embedder: Send + Sync {
     fn embed(&self, text: &str) -> Vec<f32>;
+
+    /// Stable identifier for diagnostics (surfaced by `ae --status`): `"onnx"`
+    /// for the real model, `"hash"` for the deterministic fallback.
+    fn kind(&self) -> &'static str;
 }
 
 /// The best embedder available: the ONNX model if it loads, else the hash
@@ -79,6 +83,10 @@ fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
 }
 
 impl Embedder for HashEmbedder {
+    fn kind(&self) -> &'static str {
+        "hash"
+    }
+
     fn embed(&self, text: &str) -> Vec<f32> {
         let mut v = vec![0.0f32; EMBED_DIMS];
         for token in tokenize(text) {
