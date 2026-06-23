@@ -259,7 +259,8 @@ struct Hit {
     pattern_type: Option<String>,
 }
 
-/// Render aggregated batch findings as `line:col`-tagged hits.
+/// Render aggregated findings as `line:col`-tagged hits, all at once. Used for
+/// the buffered pretty-JSON path (which needs the whole array).
 pub fn render_lines(
     out: &mut impl Write,
     results: &[LineResult],
@@ -272,17 +273,7 @@ pub fn render_lines(
                 return writeln!(out, "No acronyms found.");
             }
             for h in &hits {
-                let conf = h.confidence.map(|c| format!("{c:.2}")).unwrap_or_default();
-                let expansion = if h.expansion.is_empty() {
-                    "(no expansion)"
-                } else {
-                    &h.expansion
-                };
-                writeln!(
-                    out,
-                    "{}:{}: {:<8} {:<40} {:<9} {}",
-                    h.line, h.col, h.acronym, expansion, h.kind, conf
-                )?;
+                write_human_hit(out, h)?;
             }
         }
         Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(&hits).unwrap())?,
@@ -293,6 +284,48 @@ pub fn render_lines(
         }
     }
     Ok(())
+}
+
+/// Stream one analyzed line's findings, flushing so a consumer sees them
+/// immediately. Human and NDJSON only — pretty JSON can't emit a partial array,
+/// so callers buffer that and use [`render_lines`] at the end. Returns the hit
+/// count so the caller can detect an all-empty run.
+pub fn stream_line(
+    out: &mut impl Write,
+    result: &LineResult,
+    format: Format,
+) -> std::io::Result<usize> {
+    let hits = build_hits(std::slice::from_ref(result));
+    match format {
+        Format::Human => {
+            for h in &hits {
+                write_human_hit(out, h)?;
+            }
+        }
+        Format::Ndjson => {
+            for h in &hits {
+                writeln!(out, "{}", serde_json::to_string(h).unwrap())?;
+            }
+        }
+        Format::Json => unreachable!("pretty JSON is buffered, not streamed per line"),
+    }
+    out.flush()?;
+    Ok(hits.len())
+}
+
+/// One `line:col`-tagged hit in human (grep-style) form.
+fn write_human_hit(out: &mut impl Write, h: &Hit) -> std::io::Result<()> {
+    let conf = h.confidence.map(|c| format!("{c:.2}")).unwrap_or_default();
+    let expansion = if h.expansion.is_empty() {
+        "(no expansion)"
+    } else {
+        &h.expansion
+    };
+    writeln!(
+        out,
+        "{}:{}: {:<8} {:<40} {:<9} {}",
+        h.line, h.col, h.acronym, expansion, h.kind, conf
+    )
 }
 
 fn build_hits(results: &[LineResult]) -> Vec<Hit> {

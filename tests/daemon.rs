@@ -46,27 +46,20 @@ fn run(socket: &Path, args: &[&str], idle_secs: &str) -> (bool, String) {
     )
 }
 
-/// Pipe `text` into an `ae` invocation (the Follower path when a daemon is up).
+/// Analyze `text` as a single blob (positional arg) — the Follower path that
+/// proxies to a running daemon. (Piped stdin would stream in-process instead.)
 fn query(socket: &Path, text: &str) -> String {
-    use std::io::Write;
-    let mut child = Command::new(bin())
+    let out = Command::new(bin())
         .arg("--socket")
         .arg(socket)
         .arg("--db")
         .arg(socket.with_extension("db"))
-        .args(["-j"])
-        .stdin(Stdio::piped())
+        .args(["-j", text])
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .output()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(text.as_bytes())
-        .unwrap();
-    let out = child.wait_with_output().unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 

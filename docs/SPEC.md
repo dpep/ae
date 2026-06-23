@@ -92,8 +92,10 @@ the process thread.
 - `--status` probes the daemon read-only (never starts one) and reports its
   version, pid, uptime, and active embedder; exits non-zero when none is up, so
   `--status -q` is a silent health check.
-- Stream splitting: if stdin is not a TTY, read it to a string; else use the
-  positional `text` argument; else error.
+- Input source picks the mode: a positional `text` argument is analyzed as one
+  blob; piped stdin and `--file` are streamed line by line (`line:col` hits,
+  flushed per line for human/NDJSON; pretty JSON buffers an array); a bare TTY
+  invocation prints help.
 - `stdout` stays pristine for data; logs go to `stderr` via `env_logger`.
 
 ### Milestone 2: IPC Socket Multiplexing & Self-Healing Guardrails

@@ -3,7 +3,7 @@
 //! stdout is reserved for data; all logging is routed to stderr so a consumer
 //! piping `ae` always gets clean output.
 
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -22,9 +22,12 @@ Each expansion carries two scores: validity (is it a real expansion?) and
 confidence (is it the meaning here?). -j/--json and -J/--ndjson switch to
 machine output on every command.
 
+A positional argument is analyzed as one text; piped stdin and --file are
+streamed line by line, emitting line:col-tagged hits (use -J for a live stream).
+
 Examples:
-  ae \"ship the MVP this sprint\"     analyze a string
-  cat notes.md | ae -j               analyze stdin, emit JSON
+  ae \"ship the MVP this sprint\"     analyze one string
+  cat access.log | ae -J             stream stdin line by line as NDJSON
   ae add OKR                         declare an acronym to watch & mine
   ae list perf                       list entries matching \"perf\"";
 
@@ -72,12 +75,7 @@ pub struct Cli {
     #[arg(short, long)]
     pub read_only: bool,
 
-    /// Batch mode: analyze input line by line (e.g. `cat file | ae -b`) and
-    /// aggregate the findings, each tagged with its `line:col` position.
-    #[arg(short, long)]
-    pub batch: bool,
-
-    /// Read input from this file, analyzed line by line (implies `--batch`).
+    /// Read input from this file, analyzed line by line (like piped stdin).
     #[arg(short, long)]
     pub file: Option<PathBuf>,
 
@@ -224,52 +222,58 @@ pub fn run() -> ExitCode {
         return run_status(&cli, fmt);
     }
 
-    // The batch/file path is a bulk in-process pass; `-d` just also warms a
-    // daemon for the single-text calls that tend to follow.
-    if cli.batch || cli.file.is_some() {
-        if cli.daemon {
-            let _ = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref());
-        }
-        return run_batch(&cli, fmt);
-    }
-
-    // Resolve the single-text input once (reads stdin if piped). `Err` means
-    // there's nothing to analyze.
-    let input = determine_input(&cli);
-
-    // `-d/--daemon`: ensure a warm Leader, then serve the input through it (so
-    // the next calls are fast too). With nothing to analyze, it has simply
-    // (ensured the daemon is) started — report that and leave it running.
-    if cli.daemon {
-        let outcome = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref());
-        let Ok(text) = input else {
-            return match outcome {
-                Ok(ipc::DaemonOutcome::Started) => {
-                    status(fmt, cli.quiet, "started", "daemon started")
-                }
-                Ok(ipc::DaemonOutcome::AlreadyRunning) => {
-                    status(fmt, cli.quiet, "already_running", "daemon already running")
-                }
-                Err(e) => fail(fmt, &format!("could not start daemon: {e}")),
-            };
-        };
-        if let Err(e) = outcome {
+    // A positional argument is a single text to analyze (one "blob"); piped
+    // stdin and `--file` are streams analyzed line by line. `-d` also warms a
+    // daemon alongside, for the single-text calls that tend to follow.
+    if let Some(text) = cli.text.clone() {
+        if cli.daemon
+            && let Err(e) = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref())
+        {
             log::debug!("daemon unavailable ({e}); evaluating in-process");
         }
         return serve_text(&cli, fmt, &text);
     }
 
-    // Bare invocation with nothing to analyze: show help instead of an error.
-    let text = match input {
-        Ok(t) => t,
-        Err(_) if cli.text.is_none() && io::stdin().is_terminal() => {
-            let _ = Cli::command().print_help();
-            println!();
-            return ExitCode::SUCCESS;
+    // `--file` streams a file line by line.
+    if let Some(path) = cli.file.clone() {
+        let reader = match std::fs::File::open(&path) {
+            Ok(f) => io::BufReader::new(f),
+            Err(e) => return fail(fmt, &format!("could not read {}: {e}", path.display())),
+        };
+        if cli.daemon {
+            let _ = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref());
         }
-        Err(e) => return fail(fmt, &e),
-    };
-    serve_text(&cli, fmt, &text)
+        return run_stream(&cli, fmt, Box::new(reader));
+    }
+
+    // Piped stdin streams line by line. An empty pipe (or `/dev/null`) has
+    // nothing to stream, so with `-d` we fall through to (start and) report the
+    // daemon rather than printing an empty result.
+    if !io::stdin().is_terminal() {
+        let mut reader = io::stdin().lock();
+        let empty = matches!(reader.fill_buf(), Ok(b) if b.is_empty());
+        if !(empty && cli.daemon) {
+            if cli.daemon {
+                let _ = ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref());
+            }
+            return run_stream(&cli, fmt, Box::new(reader));
+        }
+    }
+
+    // Nothing to analyze: `-d` (ensures and) reports the daemon; otherwise a
+    // bare invocation shows help rather than erroring.
+    if cli.daemon {
+        return match ipc::start_daemon(&cli.socket, &cli.db_path(), cli.model.as_deref()) {
+            Ok(ipc::DaemonOutcome::Started) => status(fmt, cli.quiet, "started", "daemon started"),
+            Ok(ipc::DaemonOutcome::AlreadyRunning) => {
+                status(fmt, cli.quiet, "already_running", "daemon already running")
+            }
+            Err(e) => fail(fmt, &format!("could not start daemon: {e}")),
+        };
+    }
+    let _ = Cli::command().print_help();
+    println!();
+    ExitCode::SUCCESS
 }
 
 /// Serve one chunk of text: proxy to the daemon if one is up, else self-heal by
@@ -313,94 +317,76 @@ fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::
     Ok(payload)
 }
 
-/// Batch mode: analyze each input line with one warm in-process engine and emit
-/// aggregated, position-tagged hits. Runs in-process (not via the daemon) since
-/// it's one bulk pass over many lines.
-fn run_batch(cli: &Cli, fmt: Format) -> ExitCode {
-    let raw = match &cli.file {
-        Some(path) => match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => return fail(fmt, &format!("could not read {}: {e}", path.display())),
-        },
-        None => match read_raw_input(cli) {
-            Ok(r) => r,
-            Err(e) => return fail(fmt, &e),
-        },
-    };
+/// Stream input line by line through one warm in-process engine, emitting each
+/// line's findings as it's analyzed. Human/NDJSON flush per line (so `tail -f |
+/// ae -J` is live); pretty JSON can't emit a partial array, so it aggregates and
+/// renders once at the end. The default path for piped stdin and `--file`.
+/// In-process (not via the daemon), since it's one pass over many lines.
+fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode {
     let engine = match Engine::open(&cli.db_path(), cli.model.as_deref()) {
         Ok(e) => e,
         Err(e) => return fail(fmt, &format!("could not open engine: {e}")),
     };
 
-    let mut results = Vec::new();
-    for (i, line) in raw.lines().enumerate() {
+    // Pretty JSON needs the whole array to be valid, so it buffers; human and
+    // NDJSON stream per line.
+    let buffered = fmt == Format::Json;
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut collected: Vec<output::LineResult> = Vec::new();
+    let mut emitted = 0usize;
+
+    for (i, line) in reader.lines().enumerate() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => return fail(fmt, &format!("could not read input: {e}")),
+        };
         if line.trim().is_empty() {
             continue;
         }
         let payload = if cli.read_only {
-            engine.expand_only(line)
+            engine.expand_only(&line)
         } else {
-            engine.analyze(line)
+            engine.analyze(&line)
         };
-        match payload {
-            Ok(p) if !p.is_empty() => results.push(output::LineResult {
-                line: i + 1,
-                text: line.to_string(),
-                payload: p,
-            }),
-            Ok(_) => {}
-            Err(e) => return fail(fmt, &format!("evaluation failed: {e}")),
+        let payload = match payload {
+            Ok(p) => p,
+            // Skip-and-continue so one bad line doesn't abort a long stream.
+            Err(e) => {
+                log::warn!("line {}: {e}", i + 1);
+                continue;
+            }
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        let result = output::LineResult {
+            line: i + 1,
+            text: line,
+            payload,
+        };
+        if cli.quiet {
+            continue; // work (learning) still happened; just don't emit
+        }
+        if buffered {
+            collected.push(result);
+        } else if let Err(e) = output::stream_line(&mut out, &result, fmt) {
+            return fail(fmt, &format!("render failed: {e}"));
+        } else {
+            emitted += 1;
         }
     }
 
     if !cli.quiet {
-        let stdout = io::stdout();
-        if let Err(e) = output::render_lines(&mut stdout.lock(), &results, fmt) {
-            return fail(fmt, &format!("render failed: {e}"));
+        if buffered {
+            if let Err(e) = output::render_lines(&mut out, &collected, fmt) {
+                return fail(fmt, &format!("render failed: {e}"));
+            }
+        } else if emitted == 0 && fmt == Format::Human {
+            let _ = writeln!(out, "No acronyms found.");
         }
     }
     ExitCode::SUCCESS
-}
-
-/// Like [`determine_input`] but preserves the full multi-line content (no trim)
-/// so batch mode can split it into lines.
-fn read_raw_input(cli: &Cli) -> Result<String, String> {
-    if !io::stdin().is_terminal() {
-        let mut buffer = String::new();
-        io::stdin()
-            .read_to_string(&mut buffer)
-            .map_err(|e| format!("could not read stdin: {e}"))?;
-        if buffer.trim().is_empty() {
-            return Err("no input on stdin".into());
-        }
-        Ok(buffer)
-    } else if let Some(text) = &cli.text {
-        Ok(text.clone())
-    } else {
-        Err("no input: pipe text via stdin or pass it as an argument".into())
-    }
-}
-
-/// Resolve the text to analyze: piped stdin wins; otherwise the positional
-/// argument; otherwise an error.
-pub fn determine_input(cli: &Cli) -> Result<String, String> {
-    // An explicit positional arg wins (so `ae "text"` and `ae -d "text"` work the
-    // same whether or not stdin is a tty); piped stdin is the fallback.
-    if let Some(text) = &cli.text {
-        return Ok(text.clone());
-    }
-    if !io::stdin().is_terminal() {
-        let mut buffer = String::new();
-        io::stdin()
-            .read_to_string(&mut buffer)
-            .map_err(|e| format!("could not read stdin: {e}"))?;
-        let trimmed = buffer.trim().to_string();
-        if trimmed.is_empty() {
-            return Err("no input on stdin".into());
-        }
-        return Ok(trimmed);
-    }
-    Err("no input: pass text as an argument or pipe it via stdin".into())
 }
 
 /// Report daemon status to stdout, honoring the format. Read-only — probes the

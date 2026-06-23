@@ -81,9 +81,9 @@ to a deterministic hash embedder so it still runs.
 ## Usage
 
 ```sh
-ae "text to scan"          # analyze a string
-cat file | ae              # analyze stdin (-j / -J for JSON / NDJSON)
-ae -b -f notes.md          # batch: line-by-line, line:col-tagged hits
+ae "text to scan"          # analyze one string (a rich payload)
+cat access.log | ae -J     # stream stdin line by line, line:col hits as NDJSON
+ae -f notes.md             # stream a file line by line
 ae -r "…"                  # read-only: expand known acronyms, never learn
 ```
 
@@ -176,20 +176,21 @@ tokens it couldn't resolve and counts how often you've used them, so you can see
 what's worth defining. (Defining one clears it from the list.) All of these
 honor `-j`/`-J` too.
 
-Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. stdin (when
-piped) wins; otherwise the positional `TEXT` is used; with nothing to do, `ae`
-prints help. stdout carries only data — all logs go to stderr, so `ae … | jq` is
-always safe. Every command is machine-friendly: `-j`/`-J` work everywhere, and
-`--daemon`/`--stop` emit a `{"status": …}` object in those modes. `ae --status`
-reports a running daemon's version, embedder, and uptime (read-only — it never
-starts one), and exits non-zero when none is up, so `--status -q` is a silent
-health check.
+Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. A positional
+`TEXT` is analyzed as one blob; piped stdin and `--file` are streamed line by
+line; with nothing to do, `ae` prints help. stdout carries only data — all logs
+go to stderr, so `ae … | jq` is always safe. Every command is machine-friendly:
+`-j`/`-J` work everywhere, and `--daemon`/`--stop` emit a `{"status": …}` object
+in those modes. `ae --status` reports a running daemon's version, embedder, and
+uptime (read-only — it never starts one), and exits non-zero when none is up, so
+`--status -q` is a silent health check.
 
-`--batch` (or `--file`/`cat file | ae -b`) scans input line by line and
-aggregates the findings, each tagged with its `line:col` position — grep-style in
-human mode, a flat array of hits in `-j`/`-J`. `--read-only` is the safe path for
-untrusted or high-volume input — it expands known acronyms without ever writing
-to the dictionary.
+Piped stdin and `--file` scan input line by line, each finding tagged with its
+`line:col` position — grep-style in human mode, one compact object per finding
+under `-J` (flushed per line, so `tail -f … | ae -J` streams live), or a single
+aggregated array under `-j`. `--read-only` is the safe path for untrusted or
+high-volume input — it expands known acronyms without ever writing to the
+dictionary.
 
 `--model` lets you point at any compatible model — an absolute/relative path to a
 model directory or `.onnx` file, or a HuggingFace `org/name` repo id (fetched into

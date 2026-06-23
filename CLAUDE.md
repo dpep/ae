@@ -18,17 +18,21 @@ why anything deviates from the spec.
 - **Every command is agent/script-friendly.** *All* output — analysis *and*
   command status (`--daemon`, `--stop`, errors) — honors the format. Default is
   human; `-j/--json` and `-J/--ndjson` select JSON/NDJSON. Resolve the effective
-  format once via `Cli::format()`; render analysis through `output::render`
-  (or `output::render_lines` for batch) and command results through
-  `status`/`fail`. `json` is a pretty object, `ndjson` is one compact object per
-  line. When you add a command or a payload field, give it structured output in
-  the same change and keep field names stable across `src/types.rs`.
+  format once via `Cli::format()`; render a single analysis through
+  `output::render`, streamed per-line hits through `output::stream_line` (and
+  `output::render_lines` for the buffered pretty-JSON case), and command results
+  through `status`/`fail`. `json` is a pretty object/array, `ndjson` is one
+  compact object per line. When you add a command or a payload field, give it
+  structured output in the same change and keep field names stable across
+  `src/types.rs`.
 - **Read-only is a first-class mode.** `--read-only` (`-r`) expands without
   extracting or persisting — `Engine::expand_only`, no DB writes. Anything that
   mutates the dictionary must be gated by it.
-- **Batch is line-oriented.** `--batch` / `--file` analyze input line by line and
-  emit aggregated, `line:col`-tagged hits (`output::render_lines`). A bare
-  invocation with no input prints `--help`, not an error.
+- **Input source picks the mode.** A positional argument is one text → a rich
+  `AnalysisPayload` ("blob"). Piped stdin and `--file` stream line by line,
+  emitting `line:col`-tagged hits — human/NDJSON flush per line (so `tail -f |
+  ae -J` is live), pretty JSON buffers into one array. A bare invocation with no
+  input prints `--help`, not an error.
 - **Deterministic where it can be.** Parsing, the trie, MRL compression, and the
   hash fallback embedder are all deterministic and unit-tested. Keep the
   default path working offline — the real model is optional, never required.

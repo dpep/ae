@@ -1,9 +1,9 @@
 //! End-to-end tests that drive the built `ae` binary with an isolated socket
 //! and DB, exercising the no-daemon self-healing fallback path.
 //!
-//! Input is fed via stdin (the pipe path): when stdin isn't a TTY — which is
-//! always the case under the test harness — `ae` consumes it, so we pipe text
-//! rather than passing it as an argument.
+//! A single text is analyzed by passing it as the positional argument (the
+//! "blob" path that yields a rich `AnalysisPayload`). Piped stdin is the
+//! streaming, line-by-line path — exercised via [`run_piped`].
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -25,14 +25,35 @@ struct Output {
     stderr: String,
 }
 
-/// Run `ae` with `args`, feeding `stdin` (or an empty closed stdin if `None`).
-/// Auto-consolidation is disabled so tests are deterministic.
-fn run(socket: &std::path::Path, args: &[&str], stdin: Option<&str>) -> Output {
-    run_with_env(socket, args, stdin, &[("AE_CONSOLIDATE_SECS", "-1")])
+/// Run `ae` with `args`; if `text` is given it's the positional argument — the
+/// single-text "blob" path. Auto-consolidation is disabled so tests are
+/// deterministic.
+fn run(socket: &std::path::Path, args: &[&str], text: Option<&str>) -> Output {
+    run_with_env(socket, args, text, &[("AE_CONSOLIDATE_SECS", "-1")])
 }
 
 /// Like [`run`], but with explicit env overrides — e.g. forcing GC on.
 fn run_with_env(
+    socket: &std::path::Path,
+    args: &[&str],
+    text: Option<&str>,
+    env: &[(&str, &str)],
+) -> Output {
+    let mut argv: Vec<&str> = args.to_vec();
+    if let Some(t) = text {
+        argv.push(t);
+    }
+    exec(socket, &argv, None, env)
+}
+
+/// Pipe `stdin` into `ae` — the streaming, line-by-line input path.
+fn run_piped(socket: &std::path::Path, args: &[&str], stdin: &str) -> Output {
+    exec(socket, args, Some(stdin), &[("AE_CONSOLIDATE_SECS", "-1")])
+}
+
+/// Spawn the built binary with an isolated socket/DB, optionally writing
+/// `stdin`, and capture its output.
+fn exec(
     socket: &std::path::Path,
     args: &[&str],
     stdin: Option<&str>,
@@ -201,10 +222,11 @@ fn commands_emit_status_json_in_machine_mode() {
 }
 
 #[test]
-fn batch_mode_aggregates_per_line_hits_with_positions() {
-    let sock = scratch_socket("batch");
+fn piped_stdin_streams_per_line_hits_with_positions() {
+    let sock = scratch_socket("stream");
     let input = "first line has an OKR\nsecond mentions the API\n";
-    let out = run(&sock, &["--batch", "-j"], Some(input));
+    // Pretty JSON aggregates the streamed hits into one array.
+    let out = run_piped(&sock, &["-j"], input);
     assert!(out.success, "stderr: {}", out.stderr);
     let hits: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
     let arr = hits.as_array().unwrap();
@@ -216,11 +238,42 @@ fn batch_mode_aggregates_per_line_hits_with_positions() {
 }
 
 #[test]
-fn file_flag_reads_a_file_and_implies_batch() {
+fn piped_ndjson_emits_a_hit_object_per_line() {
+    let sock = scratch_socket("streamnd");
+    let out = run_piped(&sock, &["-J"], "the OKR here\nand the API there\n");
+    assert!(out.success, "stderr: {}", out.stderr);
+    let hits: Vec<serde_json::Value> = out
+        .stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let okr = hits
+        .iter()
+        .find(|v| v["acronym"] == "OKR")
+        .expect("OKR hit");
+    assert_eq!(okr["line"], 1);
+    assert!(hits.iter().any(|v| v["acronym"] == "API" && v["line"] == 2));
+}
+
+#[test]
+fn arg_is_a_blob_while_pipe_streams_lines() {
+    let sock = scratch_socket("dispatch");
+    // A positional argument is one text → a rich AnalysisPayload (has "sentence").
+    let blob = run(&sock, &["-j"], Some("the OKR review"));
+    let bv: serde_json::Value = serde_json::from_str(&blob.stdout).unwrap();
+    assert!(bv["sentence"].is_string() && bv["expansions"].is_array());
+    // Piped stdin → a flat array of line-tagged hits (no "sentence").
+    let stream = run_piped(&sock, &["-j"], "the OKR review\n");
+    let sv: serde_json::Value = serde_json::from_str(&stream.stdout).unwrap();
+    assert!(sv.is_array() && sv[0]["line"].is_number());
+}
+
+#[test]
+fn file_flag_reads_a_file_line_by_line() {
     let sock = scratch_socket("file");
     let path = std::env::temp_dir().join(format!("ae-input-{}.txt", std::process::id()));
     std::fs::write(&path, "intro line\nthis row has the OKR\n").unwrap();
-    // No stdin, no --batch — the file alone triggers aggregated output.
+    // The file alone drives the line-by-line path (like piped stdin).
     let out = run(&sock, &["--file", path.to_str().unwrap(), "-j"], None);
     assert!(out.success, "stderr: {}", out.stderr);
     let hits: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
@@ -234,9 +287,9 @@ fn file_flag_reads_a_file_and_implies_batch() {
 }
 
 #[test]
-fn batch_human_output_is_grep_style() {
-    let sock = scratch_socket("batchhuman");
-    let out = run(&sock, &["-b"], Some("line one\nthe OKR is here\n"));
+fn piped_human_output_is_grep_style() {
+    let sock = scratch_socket("streamhuman");
+    let out = run_piped(&sock, &[], "line one\nthe OKR is here\n");
     assert!(out.success, "stderr: {}", out.stderr);
     // line:col: ACR ... — the OKR is on line 2.
     assert!(
@@ -624,11 +677,12 @@ fn plain_text_reports_no_findings() {
 }
 
 #[test]
-fn empty_input_is_an_error() {
+fn empty_piped_input_finds_nothing() {
     let sock = scratch_socket("empty");
-    let out = run(&sock, &[], Some(""));
-    assert!(!out.success);
-    assert!(out.stderr.contains("no input"));
+    // Empty stream: no lines to analyze — benign, not an error.
+    let out = run_piped(&sock, &[], "");
+    assert!(out.success);
+    assert!(out.stdout.contains("No acronyms"));
 }
 
 #[test]

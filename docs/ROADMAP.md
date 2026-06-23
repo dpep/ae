@@ -102,8 +102,9 @@ commit.
 - [x] `-j/--json` + `-J/--ndjson` everywhere; `--format` removed in favor of them
 - [x] all commands emit structured status (`--daemon`/`--stop` → `{"status":…}`)
 - [x] `--read-only` (`-r`) — expand without learning/persisting
-- [x] `--batch` (`-b`) — line-by-line aggregation with `line:col` hits
-- [x] `--file` (`-f`) — read a file, implies batch
+- [x] piped stdin / `--file` (`-f`) stream line by line with `line:col` hits
+      (human/NDJSON flush per line; pretty JSON buffers); positional arg = blob
+- [x] `--status` — read-only daemon probe (version, embedder, uptime)
 - [x] bare invocation (no input, interactive) prints `--help`
 
 ## Evaluation
