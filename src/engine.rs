@@ -301,7 +301,15 @@ impl Engine {
                 .iter()
                 .find(|(_, e, _)| e.to_lowercase() == phrase)
             {
-                Some((id, _, _)) => self.store.add_context(*id, query_vec)?,
+                // Store the matched phrase's embedding, not the whole-sentence
+                // query_vec: scoring a later identical sentence against a stored
+                // copy of itself self-matches to cosine 1.0 (and makes the warm
+                // daemon, which accumulates that vector, disagree with a fresh
+                // in-process run). Mirrors learn_and_persist storing embed(def).
+                Some((id, _, _)) => {
+                    let ctx = compress_matryoshka_vector(&self.embedder.embed(&phrase));
+                    self.store.add_context(*id, &ctx)?;
+                }
                 None => {
                     let coherence = self.context_coherence(&acronym, query_vec)?;
                     self.store.record_potential(&acronym, &phrase, coherence)?;
@@ -599,6 +607,29 @@ mod tests {
                     m.confidence
                 );
             }
+        }
+    }
+
+    #[test]
+    fn repeated_identical_analysis_does_not_self_match() {
+        // Regression: mining once stored the whole-sentence vector as a context
+        // for a confirmed expansion, so re-analyzing the same sentence scored it
+        // against a stored copy of itself → cosine 1.0 (and made a warm daemon
+        // disagree with a fresh engine). Confidence must stay stable, not jump
+        // to a self-match on the second identical pass.
+        let e = Engine::in_memory().unwrap();
+        let text = "check TPS (Test Procedure Spec) for the run";
+        let conf = |p: &AnalysisPayload| {
+            p.expansions
+                .iter()
+                .find(|r| r.acronym == "TPS")
+                .map(|r| r.matches[0].confidence)
+        };
+        let c1 = conf(&e.analyze(text).unwrap());
+        let c2 = conf(&e.analyze(text).unwrap()).expect("TPS known on second pass");
+        assert!(c2 < 1.0, "self-contaminated confidence: {c2}");
+        if let Some(c1) = c1 {
+            assert!((c1 - c2).abs() < 0.2, "confidence drifted: {c1} vs {c2}");
         }
     }
 
