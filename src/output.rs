@@ -174,6 +174,35 @@ pub fn render_suggestions(
     Ok(())
 }
 
+/// Render the muted-acronym list (`ae ignore` with no argument), honoring the
+/// format like every other command.
+pub fn render_ignored(
+    out: &mut impl Write,
+    acronyms: &[String],
+    format: Format,
+) -> std::io::Result<()> {
+    match format {
+        Format::Human => {
+            if acronyms.is_empty() {
+                return writeln!(out, "No ignored acronyms.");
+            }
+            for a in acronyms {
+                writeln!(out, "{a}")?;
+            }
+        }
+        Format::Json => {
+            let rows: Vec<_> = acronyms.iter().map(|a| json!({ "acronym": a })).collect();
+            writeln!(out, "{}", serde_json::to_string_pretty(&rows).unwrap())?;
+        }
+        Format::Ndjson => {
+            for a in acronyms {
+                writeln!(out, "{}", json!({ "acronym": a }))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render daemon status. `report` is `Some` when a daemon answered, `None` when
 /// none is running; `socket`/`db` are the paths the CLI resolved (what was
 /// checked). Honors the output format like every other command.

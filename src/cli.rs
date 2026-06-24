@@ -187,6 +187,15 @@ pub enum Command {
         #[arg(short, long)]
         all: bool,
     },
+    /// Mute an acronym: keep it (and any expansions) in the dictionary but make
+    /// it inert — left out of expansion, mining, suggestions, and candidate
+    /// flagging. Unlike `rm`, nothing is deleted; `unignore` reverses it. With
+    /// no acronym, lists the muted ones.
+    #[command(visible_alias = "mute")]
+    Ignore { acronym: Option<String> },
+    /// Un-mute an acronym previously hidden with `ignore`, reactivating it.
+    #[command(visible_alias = "unmute")]
+    Unignore { acronym: String },
 }
 
 /// Entry point — parse, set up logging, dispatch by role, render.
@@ -492,6 +501,62 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             expansion,
             all,
         } => run_rm(&store, fmt, quiet, acronym, expansion.as_deref(), *all),
+        Command::Ignore { acronym } => run_ignore(&store, fmt, quiet, acronym.as_deref()),
+        Command::Unignore { acronym } => run_unignore(&store, fmt, quiet, acronym),
+    }
+}
+
+/// Mute an acronym, or — with no argument — list the muted ones.
+fn run_ignore(
+    store: &crate::store::Store,
+    fmt: Format,
+    quiet: bool,
+    acronym: Option<&str>,
+) -> ExitCode {
+    let Some(acronym) = acronym else {
+        // Listing is read-only, so `--quiet` is just a no-op exit.
+        if quiet {
+            return ExitCode::SUCCESS;
+        }
+        return match store.ignored_acronyms() {
+            Ok(list) => {
+                let stdout = io::stdout();
+                if let Err(e) = output::render_ignored(&mut stdout.lock(), &list, fmt) {
+                    return fail(fmt, &format!("render failed: {e}"));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(fmt, &format!("dictionary error: {e}")),
+        };
+    };
+    match store.ignore_acronym(acronym) {
+        Ok(()) => status(
+            fmt,
+            quiet,
+            "ignored",
+            &format!("ignoring {}", acronym.to_uppercase()),
+        ),
+        Err(e) => fail(fmt, &format!("ignore failed: {e}")),
+    }
+}
+
+/// Un-mute an acronym, reporting whether it had been ignored.
+fn run_unignore(store: &crate::store::Store, fmt: Format, quiet: bool, acronym: &str) -> ExitCode {
+    let upper = acronym.to_uppercase();
+    match store.unignore_acronym(acronym) {
+        Ok(true) => status(
+            fmt,
+            quiet,
+            "unignored",
+            &format!("no longer ignoring {upper}"),
+        ),
+        Ok(false) => status(
+            fmt,
+            quiet,
+            "not_ignored",
+            &format!("{upper} was not ignored"),
+        ),
+        Err(e) => fail(fmt, &format!("unignore failed: {e}")),
     }
 }
 

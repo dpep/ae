@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS candidate_contexts (
     n INTEGER NOT NULL DEFAULT 0
 );
 
+-- Acronyms the user has muted. Kept in the DB but inert: excluded from the
+-- expansion trie, the mining/watch list, suggestions, and candidate surfacing.
+-- Distinct from `rm` (which deletes the dictionary rows) — `unignore` reverses
+-- it and any confirmed expansions are untouched, just dormant meanwhile.
+CREATE TABLE IF NOT EXISTS ignored_acronyms (
+    acronym TEXT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Small key/value store for housekeeping state, e.g. when consolidation last ran.
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -181,7 +190,7 @@ impl Store {
     /// occurrence count.
     pub fn record_candidate(&self, acronym: &str) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
-        if acronym.is_empty() {
+        if acronym.is_empty() || self.is_ignored(&acronym)? {
             return Ok(());
         }
         self.conn.execute(
@@ -211,7 +220,9 @@ impl Store {
     /// least `min_count` times (promoted from noise to "of interest").
     pub fn watch_list(&self, min_count: i64) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT acronym FROM candidate_acronyms WHERE source = 'declared' OR count >= ?1",
+            "SELECT acronym FROM candidate_acronyms
+             WHERE (source = 'declared' OR count >= ?1)
+               AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)",
         )?;
         let rows = stmt
             .query_map(params![min_count], |row| row.get(0))?
@@ -223,7 +234,9 @@ impl Store {
     /// mineable set changed (vs rebuilding to find out).
     pub fn watch_list_count(&self, min_count: i64) -> Result<i64> {
         self.conn.query_row(
-            "SELECT COUNT(*) FROM candidate_acronyms WHERE source = 'declared' OR count >= ?1",
+            "SELECT COUNT(*) FROM candidate_acronyms
+             WHERE (source = 'declared' OR count >= ?1)
+               AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)",
             params![min_count],
             |row| row.get(0),
         )
@@ -270,13 +283,79 @@ impl Store {
         Ok(())
     }
 
+    /// Mute `acronym`: keep any confirmed expansions but make it inert —
+    /// excluded from the trie, mining, suggestions, and candidate surfacing. The
+    /// speculative trail (open candidate, mined rows, candidate context) is
+    /// cleared so it goes quiet at once. Idempotent; case-insensitive.
+    pub fn ignore_acronym(&self, acronym: &str) -> Result<()> {
+        let acronym = acronym.trim().to_uppercase();
+        if acronym.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO ignored_acronyms (acronym) VALUES (?1)",
+            params![acronym],
+        )?;
+        // Drop only the speculative state; confirmed expansions stay (dormant).
+        self.clear_candidate(&acronym)?;
+        Ok(())
+    }
+
+    /// Un-mute `acronym`, reactivating it. Returns whether it had been ignored.
+    pub fn unignore_acronym(&self, acronym: &str) -> Result<bool> {
+        let acronym = acronym.trim().to_uppercase();
+        let n = self.conn.execute(
+            "DELETE FROM ignored_acronyms WHERE acronym = ?1",
+            params![acronym],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The set of muted acronyms (uppercase) — consulted to keep them inert.
+    pub fn ignored_set(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT acronym FROM ignored_acronyms")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Muted acronyms, alphabetically — for `ae ignore` with no argument.
+    pub fn ignored_acronyms(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT acronym FROM ignored_acronyms ORDER BY acronym")?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// How many acronyms are muted — folded into the mining-trie signature so
+    /// ignoring one invalidates the cache (and a warm daemon rebuilds).
+    pub fn ignored_count(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM ignored_acronyms", [], |row| {
+                row.get(0)
+            })
+    }
+
+    /// Whether `acronym` is muted (case-insensitive).
+    fn is_ignored(&self, acronym: &str) -> Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ignored_acronyms WHERE acronym = ?1)",
+            params![acronym.trim().to_uppercase()],
+            |row| row.get(0),
+        )
+    }
+
     /// Record one sighting of a speculative (`mined`) expansion, with the vector
     /// coherence of the context it was mined from (accumulated into `coh_sum`).
     /// A pair that's already confirmed keeps its stronger source.
     pub fn record_potential(&self, acronym: &str, expansion: &str, coherence: f32) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim().to_lowercase();
-        if acronym.is_empty() || expansion.is_empty() {
+        if acronym.is_empty() || expansion.is_empty() || self.is_ignored(&acronym)? {
             return Ok(());
         }
         self.conn.execute(
@@ -607,12 +686,15 @@ impl Store {
         Ok(rows)
     }
 
-    /// Every distinct *confirmed* acronym — used to hydrate the trie. (A
-    /// mined-only acronym stays a candidate, so it isn't expanded.)
+    /// Every distinct *confirmed*, non-ignored acronym — used to hydrate the
+    /// expansion trie and seed the mining trie. (A mined-only acronym stays a
+    /// candidate, so it isn't expanded; an ignored one is dormant.)
     pub fn all_acronyms(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT acronym FROM acronym_dictionary
-             WHERE source IN ('user', 'inline') ORDER BY acronym",
+             WHERE source IN ('user', 'inline')
+               AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)
+             ORDER BY acronym",
         )?;
         let rows = stmt
             .query_map([], |row| row.get(0))?
@@ -1034,6 +1116,51 @@ mod tests {
             .map(|(a, _)| a)
             .collect();
         assert!(acrs.contains(&"MVP".to_string()) && !acrs.contains(&"XX".to_string()));
+    }
+
+    #[test]
+    fn ignoring_hides_an_acronym_but_keeps_its_expansions() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_entry("API", "Application Programming Interface", "user")
+            .unwrap();
+        s.ignore_acronym("api").unwrap(); // case-insensitive
+        // Excluded from the trie/mining source...
+        assert!(!s.all_acronyms().unwrap().contains(&"API".to_string()));
+        // ...but the confirmed expansion is still there (dormant), not deleted.
+        assert_eq!(s.expansions_for("API").unwrap().len(), 1);
+        assert_eq!(s.ignored_acronyms().unwrap(), vec!["API".to_string()]);
+        // Reversible, and idempotent on the way back.
+        assert!(s.unignore_acronym("API").unwrap());
+        assert!(s.all_acronyms().unwrap().contains(&"API".to_string()));
+        assert!(!s.unignore_acronym("API").unwrap()); // already not ignored
+    }
+
+    #[test]
+    fn ignored_acronyms_are_inert_for_candidates_and_mining() {
+        let s = Store::open_in_memory().unwrap();
+        s.ignore_acronym("XX").unwrap();
+        s.record_candidate("XX").unwrap(); // no-op while ignored
+        s.record_potential("XX", "extra example", 1.0).unwrap(); // no-op
+        assert!(s.candidates().unwrap().iter().all(|(a, _)| a != "XX"));
+        assert!(s.potentials_for("XX").unwrap().is_empty());
+        assert!(!s.watch_list(1).unwrap().contains(&"XX".to_string()));
+        assert_eq!(s.ignored_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn ignoring_clears_existing_speculation_but_not_confirmed_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_entry("MVP", "Minimum Viable Product", "user")
+            .unwrap();
+        s.record_candidate("MVP").unwrap();
+        s.record_potential("MVP", "most valuable player", 1.0)
+            .unwrap();
+        s.ignore_acronym("MVP").unwrap();
+        // Speculative trail gone...
+        assert!(s.potentials_for("MVP").unwrap().is_empty());
+        assert!(s.candidates().unwrap().iter().all(|(a, _)| a != "MVP"));
+        // ...confirmed expansion kept.
+        assert_eq!(s.expansions_for("MVP").unwrap().len(), 1);
     }
 
     #[test]

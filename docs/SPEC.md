@@ -116,6 +116,10 @@ needed to prune 384-dimensional vectors down to 64 dimensions.
 
 - `acronym_dictionary(id, acronym, expansion, created_at)` with a unique index
   on `(acronym, expansion)`.
+- `ignored_acronyms(acronym, created_at)`: a mute list. Ignored acronyms stay in
+  the dictionary but go inert — excluded from the expansion trie, the mining and
+  watch lists, suggestions, and candidate surfacing — until `unignore`. Distinct
+  from `rm`, which deletes the rows.
 - A 64-dimensional L2-normalized context-embedding store keyed by acronym.
 - `compress_matryoshka_vector`: slice the first 64 coordinates, L2-normalize,
   guard divide-by-zero.

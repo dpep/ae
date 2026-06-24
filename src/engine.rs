@@ -54,7 +54,7 @@ const MINING_TRIE_MAX_AGE: Duration = Duration::from_secs(300);
 /// `(known, watch-list)` signature it was built from and when.
 struct MiningCache {
     trie: Arc<MiningTrie>,
-    signature: (i64, i64),
+    signature: (i64, i64, i64),
     built_at: Instant,
 }
 
@@ -114,10 +114,11 @@ impl Engine {
     /// thereafter.
     pub fn analyze(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
         let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
+        let ignored = self.store.ignored_set()?;
 
-        let expansions = self.expand(text, &query_vec)?;
-        let learned = self.learn_and_persist(text)?;
-        let candidates = candidate_acronyms(text, &expansions, &learned);
+        let expansions = self.expand(text, &query_vec, &ignored)?;
+        let learned = self.learn_and_persist(text, &ignored)?;
+        let candidates = candidate_acronyms(text, &expansions, &learned, &ignored);
 
         // Stage 3: candidate tracking + speculative expansion mining (analysis
         // only — read-only leaves no trace).
@@ -136,8 +137,9 @@ impl Engine {
     /// written, so this is safe to run against a shared DB without side effects.
     pub fn expand_only(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
         let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
-        let expansions = self.expand(text, &query_vec)?;
-        let candidates = candidate_acronyms(text, &expansions, &[]);
+        let ignored = self.store.ignored_set()?;
+        let expansions = self.expand(text, &query_vec, &ignored)?;
+        let candidates = candidate_acronyms(text, &expansions, &[], &ignored);
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
@@ -147,7 +149,14 @@ impl Engine {
     }
 
     /// Stage 1 — scan the text for known acronyms and rank their expansions.
-    fn expand(&self, text: &str, query_vec: &[f32]) -> rusqlite::Result<Vec<ExpansionResult>> {
+    /// `ignored` acronyms are skipped even if the (possibly warm) trie still
+    /// holds them, so muting takes effect without rebuilding the trie.
+    fn expand(
+        &self,
+        text: &str,
+        query_vec: &[f32],
+        ignored: &std::collections::HashSet<String>,
+    ) -> rusqlite::Result<Vec<ExpansionResult>> {
         let mut results: Vec<ExpansionResult> = Vec::new();
         // Maximal munch: don't expand a "PB" that's really part of a "PB&J".
         let covered = covered_parts(text);
@@ -157,8 +166,11 @@ impl Engine {
                 continue;
             }
             let acronym = token.to_uppercase();
-            if covered.contains(&acronym) || results.iter().any(|r| r.acronym == acronym) {
-                continue; // a longer acronym covers it, or already handled
+            if ignored.contains(&acronym)
+                || covered.contains(&acronym)
+                || results.iter().any(|r| r.acronym == acronym)
+            {
+                continue; // muted, a longer acronym covers it, or already handled
             }
 
             let mut matches: Vec<MatchCandidate> = self
@@ -211,8 +223,17 @@ impl Engine {
 
     /// Stage 2 — extract inline definitions, persist them (dictionary + trie +
     /// a context embedding), and return them.
-    fn learn_and_persist(&self, text: &str) -> rusqlite::Result<Vec<Extraction>> {
-        let learned = learn::extract(text);
+    fn learn_and_persist(
+        &self,
+        text: &str,
+        ignored: &std::collections::HashSet<String>,
+    ) -> rusqlite::Result<Vec<Extraction>> {
+        // A muted acronym stays dormant — don't persist, expand, or surface its
+        // inline definition.
+        let learned: Vec<Extraction> = learn::extract(text)
+            .into_iter()
+            .filter(|c| !ignored.contains(&c.acronym.to_uppercase()))
+            .collect();
         for c in &learned {
             let id = self
                 .store
@@ -238,6 +259,16 @@ impl Engine {
     /// [`Store::declare_acronym`].
     pub fn declare_acronym(&self, acronym: &str) -> rusqlite::Result<()> {
         self.store.declare_acronym(acronym)
+    }
+
+    /// Mute an acronym — see [`Store::ignore_acronym`].
+    pub fn ignore_acronym(&self, acronym: &str) -> rusqlite::Result<()> {
+        self.store.ignore_acronym(acronym)
+    }
+
+    /// Un-mute an acronym — see [`Store::unignore_acronym`].
+    pub fn unignore_acronym(&self, acronym: &str) -> rusqlite::Result<bool> {
+        self.store.unignore_acronym(acronym)
     }
 
     /// Speculative expansions mined for `acronym`, with occurrence counts.
@@ -333,6 +364,7 @@ impl Engine {
         let signature = (
             self.store.count()?,
             self.store.watch_list_count(WATCH_THRESHOLD)?,
+            self.store.ignored_count()?,
         );
         let mut cache = self.mining_cache.lock().unwrap();
         let fresh = cache.as_ref().is_some_and(|c| {
@@ -487,7 +519,16 @@ fn candidate_acronyms(
     text: &str,
     expansions: &[ExpansionResult],
     learned: &[Extraction],
+    ignored: &std::collections::HashSet<String>,
 ) -> Vec<String> {
+    // Casing only marks an acronym when there's lowercase to contrast against.
+    // An all-caps line (a shouted headline, an all-caps log) would otherwise
+    // flag every short word, so we surface no candidates from it. A lone token
+    // is still flagged — there's nothing for it to be "shouting" relative to.
+    if is_all_caps_prose(text) {
+        return Vec::new();
+    }
+
     let mut resolved: std::collections::HashSet<String> =
         expansions.iter().map(|e| e.acronym.clone()).collect();
     resolved.extend(learned.iter().map(|c| c.acronym.to_uppercase()));
@@ -500,13 +541,16 @@ fn candidate_acronyms(
     let covered = covered_parts(text);
     for token in punctuated_acronyms(text) {
         let upper = token.to_uppercase();
+        if ignored.contains(&upper) {
+            continue;
+        }
         if !resolved.contains(&upper) && seen.insert(upper) {
             out.push(token.to_string());
         }
     }
     for token in tokens(text) {
         let upper = token.to_uppercase();
-        if !is_acronym_shaped(token) || covered.contains(&upper) {
+        if !is_acronym_shaped(token) || covered.contains(&upper) || ignored.contains(&upper) {
             continue;
         }
         if !resolved.contains(&upper) && seen.insert(upper) {
@@ -514,6 +558,14 @@ fn candidate_acronyms(
         }
     }
     out
+}
+
+/// True when `text` has multiple words and not a single lowercase letter — the
+/// all-caps shape where uppercase carries no acronym signal, so we don't mine
+/// candidates from it. A single token (no surrounding contrast) is exempt.
+fn is_all_caps_prose(text: &str) -> bool {
+    let multiword = text.split_whitespace().nth(1).is_some();
+    multiword && !text.chars().any(|c| c.is_ascii_lowercase())
 }
 
 /// Uppercase sub-tokens covered by a punctuated acronym (`PB&J` → `{PB, J}`),
@@ -898,6 +950,72 @@ mod tests {
                 .unwrap()
                 .candidates
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn all_caps_prose_surfaces_no_candidates() {
+        let e = Engine::in_memory().unwrap();
+        // Every word is 2–6 uppercase letters; without the all-caps guard each
+        // would be flagged as an acronym candidate.
+        let out = e.analyze("SHIP THE NEW MVP TODAY").unwrap();
+        assert!(out.candidates.is_empty());
+        // And the flood isn't quietly recorded either.
+        assert!(e.candidate_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_lone_all_caps_token_is_still_a_candidate() {
+        let e = Engine::in_memory().unwrap();
+        // One token has no surrounding lowercase to contrast against, so the
+        // guard doesn't apply — a bare acronym lookup still works.
+        let out = e.analyze("MVP").unwrap();
+        assert!(out.candidates.contains(&"MVP".to_string()));
+    }
+
+    #[test]
+    fn an_ignored_acronym_is_neither_expanded_nor_flagged() {
+        let e = Engine::in_memory().unwrap();
+        e.ignore_acronym("OKR").unwrap(); // a seeded, known acronym
+        let out = e.analyze("review the OKR and the MVP today").unwrap();
+        assert!(!out.expansions.iter().any(|r| r.acronym == "OKR")); // muted, dormant
+        assert!(!out.candidates.contains(&"OKR".to_string()));
+        assert!(out.candidates.contains(&"MVP".to_string())); // others unaffected
+    }
+
+    #[test]
+    fn ignoring_an_acronym_suppresses_candidate_tracking_and_mining() {
+        let e = Engine::in_memory().unwrap();
+        e.ignore_acronym("MVP").unwrap();
+        let out = e.analyze("the MVP means a minimum viable product").unwrap();
+        assert!(!out.candidates.contains(&"MVP".to_string())); // not surfaced
+        assert!(e.potentials_for("MVP").unwrap().is_empty()); // not mined
+        assert!(
+            e.candidate_counts()
+                .unwrap()
+                .iter()
+                .all(|(a, _)| a != "MVP")
+        ); // not tracked
+    }
+
+    #[test]
+    fn unignoring_reactivates_an_acronym() {
+        let e = Engine::in_memory().unwrap();
+        e.ignore_acronym("OKR").unwrap();
+        assert!(
+            !e.analyze("the OKR review")
+                .unwrap()
+                .expansions
+                .iter()
+                .any(|r| r.acronym == "OKR")
+        );
+        assert!(e.unignore_acronym("OKR").unwrap());
+        assert!(
+            e.analyze("the OKR review")
+                .unwrap()
+                .expansions
+                .iter()
+                .any(|r| r.acronym == "OKR")
         );
     }
 
