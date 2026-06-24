@@ -19,12 +19,12 @@ Unlike a static glossary, ae grows its own dictionary by watching the stream —
 
 ## Two scores, not one
 
-Internally, every `(acronym, expansion)` pair carries two independent scores — the idea ae is built on (the structured output exposes the single combined `confidence`; both scores drive ranking and pruning underneath):
+Internally, every `(acronym, expansion)` pair is judged on two independent axes — the idea ae is built on:
 
-- **validity** (`v`) — *is this a real expansion of the acronym?* Set by how the pair was learned: `1.0` when a human verified it, `0.9` for an inline definition, `0.0` for a speculative mined guess.
-- **confidence** (`c`) — *is this the meaning here?* Cosine fit of the sentence against the contexts where the expansion has appeared; `0.5` with no evidence yet.
+- **validity** — *is this a real expansion of the acronym?* Set by how the pair was learned: `1.0` when a human verified it, `0.9` for an inline definition, `0.0` for a speculative mined guess.
+- **context fit** — *is this the meaning here?* Cosine fit of the sentence against the contexts where the expansion has appeared; `0.5` with no evidence yet.
 
-Validity asks whether the expansion is real; confidence asks whether it's right *for this sentence*. A pair can be rock-solid valid (`PT → Part Time`) yet low-confidence in a physical-therapy paragraph. Both ride a provenance continuum by source — `user` (verified) > `inline` > `mined` (speculative) — which drives ranking, what shows where, and what gets pruned.
+A pair can be rock-solid valid (`PT → Part Time`) yet a poor fit in a physical-therapy paragraph. The structured output folds the two into **one** number — `confidence = validity × context fit` — so a consumer reads a single "trust this expansion here" score instead of guessing which axis to threshold. Both axes still drive ranking and pruning underneath, along a provenance continuum by source — `user` (verified) > `inline` > `mined` (speculative).
 
 ## Built for pipes and agents
 

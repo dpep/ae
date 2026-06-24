@@ -358,6 +358,29 @@ mod tests {
     }
 
     #[test]
+    fn exposed_confidence_folds_validity_into_one_score() {
+        // An inline expansion (validity 0.9) with context fit 0.8 exposes a
+        // single trust score 0.72 — validity is folded in, not shown separately.
+        let payload = AnalysisPayload {
+            sentence: "x".into(),
+            expansions: vec![ExpansionResult {
+                acronym: "TPS".into(),
+                text_slice: "TPS".into(),
+                matches: vec![MatchCandidate {
+                    expansion: "Test Procedure Spec".into(),
+                    validity: 0.9,
+                    confidence: 0.8,
+                }],
+            }],
+            extractions: vec![],
+            candidates: vec![],
+        };
+        let f = &payload.findings()[0];
+        assert!((f.confidence.unwrap() - 0.72).abs() < 1e-6);
+        assert!(f.kind == "expansion");
+    }
+
+    #[test]
     fn stream_and_single_emit_identical_findings() {
         // The same payload rendered as a single blob and as one stream line
         // must produce byte-identical NDJSON — the core alignment guarantee.

@@ -111,7 +111,10 @@ impl AnalysisPayload {
                     kind: "expansion".into(),
                     acronym: e.acronym.clone(),
                     expansion: Some(m.expansion.clone()),
-                    confidence: Some(m.confidence),
+                    // The single exposed trust score = provenance prior
+                    // (validity) folded into contextual fit. validity stays an
+                    // internal ranking/diagnostic field, not a second output.
+                    confidence: Some(m.validity * m.confidence),
                     pattern_type: None,
                 });
             }
