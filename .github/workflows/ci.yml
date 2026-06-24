@@ -47,7 +47,8 @@ jobs:
       - name: test
         run: cargo test --no-default-features --features ort-download
 
-      # Prove the single self-contained binary (model bundled in) compiles.
-      # bundled-model is opt-in now that the default loads the model externally.
-      - name: release build (bundled model)
-        run: cargo build --release --features bundled-model
+      # Prove the single self-contained binary compiles in release mode. The
+      # model is fetched from the HuggingFace Hub at runtime (no build-time
+      # bundling), so the default features are what ships.
+      - name: release build
+        run: cargo build --release
