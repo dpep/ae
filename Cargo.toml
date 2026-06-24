@@ -21,7 +21,12 @@ fs2 = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 ort = { version = "=2.0.0-rc.12", default-features = false }
-tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+# `fancy-regex` (pure Rust) is the regex backend, not the default `onig`: onig
+# compiles the Oniguruma C library, which makes the Homebrew build need an extra
+# C/C++ toolchain (llvm). fancy-regex needs no native compile and is a drop-in
+# for our inference-only path. `esaxx_fast` stays off too (its C++ compile), so
+# bundled SQLite is the one remaining C dependency.
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 # The embedding model is fetched on first use from the HuggingFace Hub into the
 # shared cache (~/.cache/huggingface/hub), so it's reused across tools and no
 # longer downloaded at build time. `ureq` = the sync client; no tokio. 0.5 is
