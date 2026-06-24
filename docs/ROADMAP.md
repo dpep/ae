@@ -102,8 +102,9 @@ commit.
 - [x] `-j/--json` + `-J/--ndjson` everywhere; `--format` removed in favor of them
 - [x] all commands emit structured status (`--daemon`/`--stop` → `{"status":…}`)
 - [x] `--read-only` (`-r`) — expand without learning/persisting
-- [x] piped stdin / `--file` (`-f`) stream line by line with `line:col` hits
-      (human/NDJSON flush per line; pretty JSON buffers); positional arg = blob
+- [x] piped stdin / `--file` (`-f`) stream line by line (human/NDJSON flush per
+      line; pretty JSON buffers); positional arg = blob. Both emit the same flat
+      `Finding` list — single/stream and `-j`/`-J` share one shape (no line:col)
 - [x] `--status` — read-only daemon probe (version, embedder, uptime)
 - [x] bare invocation (no input, interactive) prints `--help`
 

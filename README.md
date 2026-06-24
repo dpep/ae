@@ -19,7 +19,7 @@ Unlike a static glossary, ae grows its own dictionary by watching the stream —
 
 ## Two scores, not one
 
-Every `(acronym, expansion)` pair carries two independent scores — the idea ae is built on:
+Internally, every `(acronym, expansion)` pair carries two independent scores — the idea ae is built on (the structured output exposes the single combined `confidence`; both scores drive ranking and pruning underneath):
 
 - **validity** (`v`) — *is this a real expansion of the acronym?* Set by how the pair was learned: `1.0` when a human verified it, `0.9` for an inline definition, `0.0` for a speculative mined guess.
 - **confidence** (`c`) — *is this the meaning here?* Cosine fit of the sentence against the contexts where the expansion has appeared; `0.5` with no evidence yet.
@@ -28,29 +28,21 @@ Validity asks whether the expansion is real; confidence asks whether it's right 
 
 ## Built for pipes and agents
 
-ae's real interface is a pipe: send text on stdin, read structured JSON on stdout — `-j` for a pretty object, `-J` for NDJSON:
+ae's real interface is a pipe: send text on stdin, read structured JSON on stdout. The output is a flat list of **findings** — one per expansion match, inline extraction, or unresolved candidate — identical whether the input was one blob or a stream: `-j` is a pretty array, `-J` is one finding per line.
 
 ```sh
 $ printf 'ship the OKR review this sprint' | ae -j
-{
-  "sentence": "ship the OKR review this sprint",
-  "expansions": [
-    {
-      "acronym": "OKR",
-      "text_slice": "OKR",
-      "matches": [
-        {
-          "expansion": "Objectives and Key Results",
-          "validity": 1.0,
-          "confidence": 0.5
-        }
-      ]
-    }
-  ],
-  "extractions": [],
-  "candidates": []
-}
+[
+  {
+    "kind": "expansion",
+    "acronym": "OKR",
+    "expansion": "Objectives and Key Results",
+    "confidence": 0.5
+  }
+]
 ```
+
+An acronym with several candidate expansions yields several `expansion` findings, each with its own `confidence`; group by `acronym` to rank them. A `candidate` is just `{"kind": "candidate", "acronym": "…"}`; an `extraction` adds `pattern_type`. Each finding carries a single `confidence` — provenance (`validity`) is an internal prior that feeds it, surfaced on the dictionary commands (`list`/`show`) rather than per finding.
 
 Agents and tools hit org-specific acronyms constantly and can't phone a server for them — ae resolves them locally, in-process, in milliseconds.
 
@@ -81,8 +73,8 @@ to a deterministic hash embedder so it still runs.
 ## Usage
 
 ```sh
-ae "text to scan"          # analyze one string (a rich payload)
-cat access.log | ae -J     # stream stdin line by line, line:col hits as NDJSON
+ae "text to scan"          # analyze one string → findings array
+cat access.log | ae -J     # stream stdin line by line, findings as NDJSON
 ae -f notes.md             # stream a file line by line
 ae -r "…"                  # read-only: expand known acronyms, never learn
 ```
@@ -178,19 +170,18 @@ honor `-j`/`-J` too.
 
 Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. A positional
 `TEXT` is analyzed as one blob; piped stdin and `--file` are streamed line by
-line; with nothing to do, `ae` prints help. stdout carries only data — all logs
-go to stderr, so `ae … | jq` is always safe. Every command is machine-friendly:
-`-j`/`-J` work everywhere, and `--daemon`/`--stop` emit a `{"status": …}` object
-in those modes. `ae --status` reports a running daemon's version, embedder, and
-uptime (read-only — it never starts one), and exits non-zero when none is up, so
-`--status -q` is a silent health check.
+line — but either way the structured output is the same flat list of findings,
+so a consumer parses one shape. With nothing to do, `ae` prints help. stdout
+carries only data — all logs go to stderr, so `ae … | jq` is always safe. Every
+command is machine-friendly: `-j`/`-J` work everywhere, and `--daemon`/`--stop`
+emit a `{"status": …}` object in those modes. `ae --status` reports a running
+daemon's version, embedder, and uptime (read-only — it never starts one), and
+exits non-zero when none is up, so `--status -q` is a silent health check.
 
-Piped stdin and `--file` scan input line by line, each finding tagged with its
-`line:col` position — grep-style in human mode, one compact object per finding
-under `-J` (flushed per line, so `tail -f … | ae -J` streams live), or a single
-aggregated array under `-j`. `--read-only` is the safe path for untrusted or
-high-volume input — it expands known acronyms without ever writing to the
-dictionary.
+Under `-J` each finding is one compact object, flushed as it's produced (so
+`tail -f … | ae -J` streams live); `-j` collects them into one pretty array.
+`--read-only` is the safe path for untrusted or high-volume input — it expands
+known acronyms without ever writing to the dictionary.
 
 `--model` lets you point at any compatible model — an absolute/relative path to a
 model directory or `.onnx` file, or a HuggingFace `org/name` repo id (fetched into

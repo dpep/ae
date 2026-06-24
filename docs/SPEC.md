@@ -93,9 +93,10 @@ the process thread.
   version, pid, uptime, and active embedder; exits non-zero when none is up, so
   `--status -q` is a silent health check.
 - Input source picks the mode: a positional `text` argument is analyzed as one
-  blob; piped stdin and `--file` are streamed line by line (`line:col` hits,
-  flushed per line for human/NDJSON; pretty JSON buffers an array); a bare TTY
-  invocation prints help.
+  blob; piped stdin and `--file` are streamed line by line (flushed per line for
+  human/NDJSON; pretty JSON buffers an array). Either way the structured output
+  is the same flat list of findings (`{kind, acronym, …}`) — single and stream,
+  `-j` and `-J`, all share one shape. A bare TTY invocation prints help.
 - `stdout` stays pristine for data; logs go to `stderr` via `env_logger`.
 
 ### Milestone 2: IPC Socket Multiplexing & Self-Healing Guardrails

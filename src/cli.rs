@@ -23,7 +23,8 @@ confidence (is it the meaning here?). -j/--json and -J/--ndjson switch to
 machine output on every command.
 
 A positional argument is analyzed as one text; piped stdin and --file are
-streamed line by line, emitting line:col-tagged hits (use -J for a live stream).
+streamed line by line. Either way the structured output is the same flat list of
+findings — -j is a pretty array, -J is one finding per line (a live stream).
 
 Examples:
   ae \"ship the MVP this sprint\"     analyze one string
@@ -333,7 +334,7 @@ fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode 
     let buffered = fmt == Format::Json;
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let mut collected: Vec<output::LineResult> = Vec::new();
+    let mut collected: Vec<crate::types::AnalysisPayload> = Vec::new();
     let mut emitted = 0usize;
 
     for (i, line) in reader.lines().enumerate() {
@@ -360,17 +361,12 @@ fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode 
         if payload.is_empty() {
             continue;
         }
-        let result = output::LineResult {
-            line: i + 1,
-            text: line,
-            payload,
-        };
         if cli.quiet {
             continue; // work (learning) still happened; just don't emit
         }
         if buffered {
-            collected.push(result);
-        } else if let Err(e) = output::stream_line(&mut out, &result, fmt) {
+            collected.push(payload);
+        } else if let Err(e) = output::stream_line(&mut out, &payload, fmt) {
             return fail(fmt, &format!("render failed: {e}"));
         } else {
             emitted += 1;

@@ -77,8 +77,11 @@ fn daemon_starts_serves_a_follower_and_stops() {
 
     // A follower query is served by the daemon and returns valid JSON.
     let body = query(&sock, "Check the OKR board.");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["expansions"][0]["acronym"], "OKR");
+    let v: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
 
     // Starting again is a no-op while one is running.
     let (ok2, msg2) = run(&sock, &["--daemon"], "30");
@@ -103,8 +106,11 @@ fn daemon_flag_with_input_warms_and_serves() {
     // the daemon status — and leaves the daemon warm.
     let (ok, body) = run(&sock, &["-d", "-j", "Check the OKR board."], "30");
     assert!(ok, "{body}");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["expansions"][0]["acronym"], "OKR");
+    let v: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
     assert!(
         !body.contains("\"status\""),
         "printed daemon status, not analysis: {body}"
@@ -112,8 +118,11 @@ fn daemon_flag_with_input_warms_and_serves() {
     assert!(connectable(&sock), "daemon should be left running warm");
 
     // The warm daemon serves a subsequent plain query.
-    let v2: serde_json::Value = serde_json::from_str(&query(&sock, "Another OKR.")).unwrap();
-    assert_eq!(v2["expansions"][0]["acronym"], "OKR");
+    let v2: Vec<serde_json::Value> = serde_json::from_str(&query(&sock, "Another OKR.")).unwrap();
+    assert!(
+        v2.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
 
     let (stopped, _) = run(&sock, &["--stop"], "30");
     assert!(stopped);

@@ -106,10 +106,11 @@ fn json_output_parses_and_reports_learning() {
         Some("Our KPI (Key Performance Indicator) is up."),
     );
     assert!(out.success, "stderr: {}", out.stderr);
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    assert!(v["sentence"].is_string());
-    let learned = v["extractions"].as_array().unwrap();
-    assert!(learned.iter().any(|c| c["acronym"] == "KPI"));
+    let v: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    assert!(
+        v.iter()
+            .any(|f| f["kind"] == "extraction" && f["acronym"] == "KPI")
+    );
 }
 
 #[test]
@@ -131,12 +132,11 @@ fn learning_persists_across_invocations_via_shared_db() {
     assert!(first.stdout.contains("extraction"));
     // Second pass — same socket → same DB — now expands it.
     let second = run(&sock, &["-j"], Some("Drain the ZQ now."));
-    let v: serde_json::Value = serde_json::from_str(&second.stdout).unwrap();
-    let expansions = v["expansions"].as_array().unwrap();
+    let v: Vec<serde_json::Value> = serde_json::from_str(&second.stdout).unwrap();
     assert!(
-        expansions
-            .iter()
-            .any(|e| e["acronym"] == "ZQ" && e["matches"][0]["expansion"] == "Zebra Queue"),
+        v.iter().any(|f| f["kind"] == "expansion"
+            && f["acronym"] == "ZQ"
+            && f["expansion"] == "Zebra Queue"),
         "ZQ was not expanded on the second pass: {}",
         second.stdout
     );
@@ -153,8 +153,11 @@ fn model_flag_is_accepted_and_degrades_gracefully() {
         Some("Check the OKR board."),
     );
     assert!(out.success, "stderr: {}", out.stderr);
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    assert_eq!(v["expansions"][0]["acronym"], "OKR");
+    let v: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    assert!(
+        v.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
     // The fallback is announced once, clearly, on stderr so it's fixable — and
     // never pollutes stdout (which stays clean JSON, parsed above).
     assert!(
@@ -173,34 +176,28 @@ fn read_only_expands_without_learning_or_persisting() {
         &["--read-only", "-j"],
         Some("The ZQ (Zebra Queue) backs the OKR."),
     );
-    let v: serde_json::Value = serde_json::from_str(&first.stdout).unwrap();
+    let v: Vec<serde_json::Value> = serde_json::from_str(&first.stdout).unwrap();
     assert!(
-        v["expansions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["acronym"] == "OKR")
+        v.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
     );
-    assert!(v["extractions"].as_array().unwrap().is_empty());
+    assert!(!v.iter().any(|f| f["kind"] == "extraction"));
 
     // ...and nothing was persisted: a normal later pass still doesn't know ZQ.
     let second = run(&sock, &["-j"], Some("Drain the ZQ."));
-    let v2: serde_json::Value = serde_json::from_str(&second.stdout).unwrap();
+    let v2: Vec<serde_json::Value> = serde_json::from_str(&second.stdout).unwrap();
     assert!(
-        !v2["expansions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["acronym"] == "ZQ")
+        !v2.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "ZQ")
     );
 }
 
 #[test]
 fn short_json_and_ndjson_flags_select_the_format() {
     let sock = scratch_socket("shortflags");
-    // -j → a single pretty JSON object.
+    // -j → a pretty JSON array of findings.
     let j = run(&sock, &["-j"], Some("Check the OKR board."));
-    serde_json::from_str::<serde_json::Value>(&j.stdout).expect("-j is valid JSON");
+    serde_json::from_str::<Vec<serde_json::Value>>(&j.stdout).expect("-j is a JSON array");
 
     // -J → one compact object per line.
     let nd = run(&sock, &["-J"], Some("Check the OKR board."));
@@ -222,23 +219,19 @@ fn commands_emit_status_json_in_machine_mode() {
 }
 
 #[test]
-fn piped_stdin_streams_per_line_hits_with_positions() {
+fn piped_stdin_streams_findings_as_an_array() {
     let sock = scratch_socket("stream");
     let input = "first line has an OKR\nsecond mentions the API\n";
-    // Pretty JSON aggregates the streamed hits into one array.
+    // Pretty JSON aggregates the streamed findings into one array.
     let out = run_piped(&sock, &["-j"], input);
     assert!(out.success, "stderr: {}", out.stderr);
-    let hits: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    let arr = hits.as_array().unwrap();
-    assert!(
-        arr.iter()
-            .any(|h| h["acronym"] == "OKR" && h["line"] == 1 && h["col"].as_u64().unwrap() > 0)
-    );
-    assert!(arr.iter().any(|h| h["acronym"] == "API" && h["line"] == 2));
+    let hits: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    assert!(hits.iter().any(|h| h["acronym"] == "OKR"));
+    assert!(hits.iter().any(|h| h["acronym"] == "API"));
 }
 
 #[test]
-fn piped_ndjson_emits_a_hit_object_per_line() {
+fn piped_ndjson_emits_a_finding_object_per_line() {
     let sock = scratch_socket("streamnd");
     let out = run_piped(&sock, &["-J"], "the OKR here\nand the API there\n");
     assert!(out.success, "stderr: {}", out.stderr);
@@ -247,25 +240,24 @@ fn piped_ndjson_emits_a_hit_object_per_line() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    let okr = hits
-        .iter()
-        .find(|v| v["acronym"] == "OKR")
-        .expect("OKR hit");
-    assert_eq!(okr["line"], 1);
-    assert!(hits.iter().any(|v| v["acronym"] == "API" && v["line"] == 2));
+    assert!(hits.iter().any(|v| v["acronym"] == "OKR"));
+    assert!(hits.iter().any(|v| v["acronym"] == "API"));
 }
 
 #[test]
-fn arg_is_a_blob_while_pipe_streams_lines() {
+fn arg_and_pipe_emit_the_same_shape() {
     let sock = scratch_socket("dispatch");
-    // A positional argument is one text → a rich AnalysisPayload (has "sentence").
+    // A positional blob and a piped line of the same text now produce an
+    // identical flat array of findings — no "sentence"/"line" wrapper either way.
     let blob = run(&sock, &["-j"], Some("the OKR review"));
-    let bv: serde_json::Value = serde_json::from_str(&blob.stdout).unwrap();
-    assert!(bv["sentence"].is_string() && bv["expansions"].is_array());
-    // Piped stdin → a flat array of line-tagged hits (no "sentence").
+    let bv: Vec<serde_json::Value> = serde_json::from_str(&blob.stdout).unwrap();
     let stream = run_piped(&sock, &["-j"], "the OKR review\n");
-    let sv: serde_json::Value = serde_json::from_str(&stream.stdout).unwrap();
-    assert!(sv.is_array() && sv[0]["line"].is_number());
+    let sv: Vec<serde_json::Value> = serde_json::from_str(&stream.stdout).unwrap();
+    assert_eq!(bv, sv);
+    assert!(
+        bv.iter()
+            .all(|f| f["kind"].is_string() && f.get("line").is_none())
+    );
 }
 
 #[test]
@@ -276,27 +268,17 @@ fn file_flag_reads_a_file_line_by_line() {
     // The file alone drives the line-by-line path (like piped stdin).
     let out = run(&sock, &["--file", path.to_str().unwrap(), "-j"], None);
     assert!(out.success, "stderr: {}", out.stderr);
-    let hits: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    assert!(
-        hits.as_array()
-            .unwrap()
-            .iter()
-            .any(|h| h["acronym"] == "OKR" && h["line"] == 2)
-    );
+    let hits: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    assert!(hits.iter().any(|h| h["acronym"] == "OKR"));
     std::fs::remove_file(&path).ok();
 }
 
 #[test]
-fn piped_human_output_is_grep_style() {
+fn piped_human_output_lists_findings() {
     let sock = scratch_socket("streamhuman");
     let out = run_piped(&sock, &[], "line one\nthe OKR is here\n");
     assert!(out.success, "stderr: {}", out.stderr);
-    // line:col: ACR ... — the OKR is on line 2.
-    assert!(
-        out.stdout
-            .lines()
-            .any(|l| l.starts_with("2:") && l.contains("OKR"))
-    );
+    assert!(out.stdout.lines().any(|l| l.contains("OKR")));
 }
 
 #[test]
@@ -304,10 +286,10 @@ fn unknown_acronyms_are_surfaced() {
     let sock = scratch_socket("unknown");
     let out = run(&sock, &["-j"], Some("hi there MVP"));
     assert!(out.success, "stderr: {}", out.stderr);
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    let unknown = v["candidates"].as_array().unwrap();
+    let v: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
     assert!(
-        unknown.iter().any(|u| u == "MVP"),
+        v.iter()
+            .any(|f| f["kind"] == "candidate" && f["acronym"] == "MVP"),
         "MVP not surfaced: {}",
         out.stdout
     );
@@ -351,20 +333,14 @@ fn manage_add_list_search_show_then_remove() {
 
     // An added acronym now expands and is no longer a candidate.
     let analyze = run(&sock, &["-j"], Some("ship the MVP"));
-    let a: serde_json::Value = serde_json::from_str(&analyze.stdout).unwrap();
+    let a: Vec<serde_json::Value> = serde_json::from_str(&analyze.stdout).unwrap();
     assert!(
-        a["expansions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["acronym"] == "MVP")
+        a.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "MVP")
     );
     assert!(
-        !a["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c == "MVP")
+        !a.iter()
+            .any(|f| f["kind"] == "candidate" && f["acronym"] == "MVP")
     );
 
     let rm = run(&sock, &["rm", "MVP", "-j"], None);
@@ -590,27 +566,27 @@ fn list_marks_verified_source() {
 }
 
 #[test]
-fn analysis_matches_carry_validity_and_confidence() {
-    let sock = scratch_socket("validity");
+fn expansion_findings_carry_a_confidence() {
+    let sock = scratch_socket("confidence");
     let out = run(&sock, &["-j"], Some("Check the OKR board."));
-    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
-    let m = &v["expansions"][0]["matches"][0];
-    // OKR is a curated (user) default → fully valid.
-    assert_eq!(m["validity"], 1.0);
+    let v: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    let m = v
+        .iter()
+        .find(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+        .expect("OKR expansion finding");
+    // A single trust score is exposed; provenance/validity stays internal.
     assert!(m["confidence"].as_f64().is_some());
+    assert!(m.get("validity").is_none());
 }
 
 #[test]
 fn punctuated_acronym_is_a_candidate_and_mines() {
     let sock = scratch_socket("pbj");
     let a = run(&sock, &["-j"], Some("a PB&J is peanut butter and jelly"));
-    let v: serde_json::Value = serde_json::from_str(&a.stdout).unwrap();
+    let v: Vec<serde_json::Value> = serde_json::from_str(&a.stdout).unwrap();
     assert!(
-        v["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c == "PB&J")
+        v.iter()
+            .any(|f| f["kind"] == "candidate" && f["acronym"] == "PB&J")
     );
 
     let s = run(
@@ -653,13 +629,10 @@ fn auto_consolidation_runs_after_a_write_and_prunes_noise() {
     // noise candidate is cleaned up by the pass that fires after this analysis.
     let env = [("AE_CONSOLIDATE_SECS", "0"), ("AE_PRUNE_GRACE_SECS", "0")];
     let a = run_with_env(&sock, &["-j"], Some("the ZZQ widget"), &env);
-    let v: serde_json::Value = serde_json::from_str(&a.stdout).unwrap();
+    let v: Vec<serde_json::Value> = serde_json::from_str(&a.stdout).unwrap();
     assert!(
-        v["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c == "ZZQ")
+        v.iter()
+            .any(|f| f["kind"] == "candidate" && f["acronym"] == "ZZQ")
     );
 
     // The candidate is gone — consolidation pruned it (read-only command won't refire).

@@ -9,46 +9,56 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::cli::Format;
-use crate::types::{AnalysisPayload, StatusPayload};
+use crate::types::{AnalysisPayload, Finding, StatusPayload};
 
-/// Render `payload` to `out` in `format`.
+/// Render one analysis to `out` in `format`.
 pub fn render(
     out: &mut impl Write,
     payload: &AnalysisPayload,
     format: Format,
 ) -> std::io::Result<()> {
+    render_findings(out, &payload.findings(), format)
+}
+
+/// The single structured-output path. `findings` may come from one blob or an
+/// aggregated stream; either way `-j` is a pretty array and `-J` is one object
+/// per line, so single and stream modes emit an identical shape.
+pub fn render_findings(
+    out: &mut impl Write,
+    findings: &[Finding],
+    format: Format,
+) -> std::io::Result<()> {
     match format {
-        Format::Human => render_human(out, payload),
-        Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(payload).unwrap()),
-        Format::Ndjson => render_ndjson(out, payload),
+        Format::Human => {
+            if findings.is_empty() {
+                return writeln!(out, "No acronyms found.");
+            }
+            for f in findings {
+                write_human_finding(out, f)?;
+            }
+            Ok(())
+        }
+        Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(findings).unwrap()),
+        Format::Ndjson => {
+            for f in findings {
+                writeln!(out, "{}", serde_json::to_string(f).unwrap())?;
+            }
+            Ok(())
+        }
     }
 }
 
-fn render_human(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Result<()> {
-    if payload.is_empty() {
-        return writeln!(out, "No acronyms found.");
-    }
-    for r in &payload.expansions {
-        for m in &r.matches {
-            // validity = is this a real expansion; confidence = fit for this context.
-            writeln!(
-                out,
-                "{:<8} {:<40} expansion  v{:.2} c{:.2}",
-                r.acronym, m.expansion, m.validity, m.confidence
-            )?;
-        }
-    }
-    for c in &payload.extractions {
-        writeln!(
+/// One finding in human (column) form: acronym, expansion, kind, confidence.
+fn write_human_finding(out: &mut impl Write, f: &Finding) -> std::io::Result<()> {
+    let expansion = f.expansion.as_deref().unwrap_or("(no expansion)");
+    match f.confidence {
+        Some(c) => writeln!(
             out,
-            "{:<8} {:<40} extraction {:.2}",
-            c.acronym, c.extracted_definition, c.confidence
-        )?;
+            "{:<8} {:<40} {:<10} {:.2}",
+            f.acronym, expansion, f.kind, c
+        ),
+        None => writeln!(out, "{:<8} {:<40} {}", f.acronym, expansion, f.kind),
     }
-    for acronym in &payload.candidates {
-        writeln!(out, "{:<8} {:<40} candidate", acronym, "(no expansion)")?;
-    }
-    Ok(())
 }
 
 /// Render `(acronym, expansion, source)` dictionary entries (list/show). The
@@ -237,183 +247,49 @@ fn fmt_uptime(secs: u64) -> String {
     }
 }
 
-/// One analyzed line of a batch run: its number, original text, and findings.
-pub struct LineResult {
-    pub line: usize,
-    pub text: String,
-    pub payload: AnalysisPayload,
-}
-
-/// A single position-tagged finding in batch output.
-#[derive(serde::Serialize)]
-struct Hit {
-    kind: &'static str,
-    line: usize,
-    col: usize,
-    acronym: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    expansion: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    confidence: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pattern_type: Option<String>,
-}
-
-/// Render aggregated findings as `line:col`-tagged hits, all at once. Used for
-/// the buffered pretty-JSON path (which needs the whole array).
+/// Render aggregated stream findings all at once. Used for the buffered
+/// pretty-JSON path (which needs the whole array); delegates to the same
+/// [`render_findings`] path as a single analysis.
 pub fn render_lines(
     out: &mut impl Write,
-    results: &[LineResult],
+    payloads: &[AnalysisPayload],
     format: Format,
 ) -> std::io::Result<()> {
-    let hits = build_hits(results);
-    match format {
-        Format::Human => {
-            if hits.is_empty() {
-                return writeln!(out, "No acronyms found.");
-            }
-            for h in &hits {
-                write_human_hit(out, h)?;
-            }
-        }
-        Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(&hits).unwrap())?,
-        Format::Ndjson => {
-            for h in &hits {
-                writeln!(out, "{}", serde_json::to_string(h).unwrap())?;
-            }
-        }
-    }
-    Ok(())
+    let findings: Vec<Finding> = payloads.iter().flat_map(|p| p.findings()).collect();
+    render_findings(out, &findings, format)
 }
 
 /// Stream one analyzed line's findings, flushing so a consumer sees them
 /// immediately. Human and NDJSON only — pretty JSON can't emit a partial array,
-/// so callers buffer that and use [`render_lines`] at the end. Returns the hit
-/// count so the caller can detect an all-empty run.
+/// so callers buffer that and use [`render_lines`] at the end. Returns the
+/// finding count so the caller can detect an all-empty run.
 pub fn stream_line(
     out: &mut impl Write,
-    result: &LineResult,
+    payload: &AnalysisPayload,
     format: Format,
 ) -> std::io::Result<usize> {
-    let hits = build_hits(std::slice::from_ref(result));
+    let findings = payload.findings();
     match format {
         Format::Human => {
-            for h in &hits {
-                write_human_hit(out, h)?;
+            for f in &findings {
+                write_human_finding(out, f)?;
             }
         }
         Format::Ndjson => {
-            for h in &hits {
-                writeln!(out, "{}", serde_json::to_string(h).unwrap())?;
+            for f in &findings {
+                writeln!(out, "{}", serde_json::to_string(f).unwrap())?;
             }
         }
         Format::Json => unreachable!("pretty JSON is buffered, not streamed per line"),
     }
     out.flush()?;
-    Ok(hits.len())
-}
-
-/// One `line:col`-tagged hit in human (grep-style) form.
-fn write_human_hit(out: &mut impl Write, h: &Hit) -> std::io::Result<()> {
-    let conf = h.confidence.map(|c| format!("{c:.2}")).unwrap_or_default();
-    let expansion = if h.expansion.is_empty() {
-        "(no expansion)"
-    } else {
-        &h.expansion
-    };
-    writeln!(
-        out,
-        "{}:{}: {:<8} {:<40} {:<9} {}",
-        h.line, h.col, h.acronym, expansion, h.kind, conf
-    )
-}
-
-fn build_hits(results: &[LineResult]) -> Vec<Hit> {
-    let mut hits = Vec::new();
-    for r in results {
-        for e in &r.payload.expansions {
-            let col = col_of(&r.text, &e.text_slice);
-            for m in &e.matches {
-                hits.push(Hit {
-                    kind: "expansion",
-                    line: r.line,
-                    col,
-                    acronym: e.acronym.clone(),
-                    expansion: m.expansion.clone(),
-                    confidence: Some(m.confidence),
-                    pattern_type: None,
-                });
-            }
-        }
-        for c in &r.payload.extractions {
-            hits.push(Hit {
-                kind: "extraction",
-                line: r.line,
-                col: col_of(&r.text, &c.acronym),
-                acronym: c.acronym.clone(),
-                expansion: c.extracted_definition.clone(),
-                confidence: Some(c.confidence),
-                pattern_type: Some(c.pattern_type.clone()),
-            });
-        }
-        for acronym in &r.payload.candidates {
-            hits.push(Hit {
-                kind: "candidate",
-                line: r.line,
-                col: col_of(&r.text, acronym),
-                acronym: acronym.clone(),
-                expansion: String::new(),
-                confidence: None,
-                pattern_type: None,
-            });
-        }
-    }
-    hits
-}
-
-/// 1-indexed character column where `needle` first appears in `line`.
-fn col_of(line: &str, needle: &str) -> usize {
-    match line.find(needle) {
-        Some(byte) => line[..byte].chars().count() + 1,
-        None => 1,
-    }
-}
-
-fn render_ndjson(out: &mut impl Write, payload: &AnalysisPayload) -> std::io::Result<()> {
-    for r in &payload.expansions {
-        for m in &r.matches {
-            let line = json!({
-                "kind": "expansion",
-                "acronym": r.acronym,
-                "text_slice": r.text_slice,
-                "expansion": m.expansion,
-                "validity": m.validity,
-                "confidence": m.confidence,
-            });
-            writeln!(out, "{line}")?;
-        }
-    }
-    for c in &payload.extractions {
-        let line = json!({
-            "kind": "extraction",
-            "acronym": c.acronym,
-            "expansion": c.extracted_definition,
-            "pattern_type": c.pattern_type,
-            "confidence": c.confidence,
-        });
-        writeln!(out, "{line}")?;
-    }
-    for acronym in &payload.candidates {
-        let line = json!({ "kind": "candidate", "acronym": acronym });
-        writeln!(out, "{line}")?;
-    }
-    Ok(())
+    Ok(findings.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExpansionResult, Extraction, MatchCandidate};
+    use crate::types::{ExpansionResult, Extraction, Finding, MatchCandidate};
 
     fn sample() -> AnalysisPayload {
         AnalysisPayload {
@@ -453,14 +329,14 @@ mod tests {
     }
 
     #[test]
-    fn json_round_trips_to_the_same_payload() {
+    fn json_round_trips_to_the_same_findings() {
         let s = rendered(Format::Json);
-        let back: AnalysisPayload = serde_json::from_str(&s).unwrap();
-        assert_eq!(back, sample());
+        let back: Vec<Finding> = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, sample().findings());
     }
 
     #[test]
-    fn ndjson_is_one_object_per_line() {
+    fn ndjson_is_one_finding_per_line() {
         let s = rendered(Format::Ndjson);
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines.len(), 3); // expansion + extraction + candidate
@@ -468,6 +344,28 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
             assert!(v.get("kind").is_some());
         }
+    }
+
+    #[test]
+    fn json_and_ndjson_carry_the_same_objects() {
+        // -j is a pretty array, -J is one-per-line — same objects, minimal diff.
+        let arr: Vec<Finding> = serde_json::from_str(&rendered(Format::Json)).unwrap();
+        let lines: Vec<Finding> = rendered(Format::Ndjson)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(arr, lines);
+    }
+
+    #[test]
+    fn stream_and_single_emit_identical_findings() {
+        // The same payload rendered as a single blob and as one stream line
+        // must produce byte-identical NDJSON — the core alignment guarantee.
+        let mut single = Vec::new();
+        render(&mut single, &sample(), Format::Ndjson).unwrap();
+        let mut streamed = Vec::new();
+        stream_line(&mut streamed, &sample(), Format::Ndjson).unwrap();
+        assert_eq!(single, streamed);
     }
 
     #[test]

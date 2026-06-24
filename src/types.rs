@@ -49,6 +49,27 @@ pub struct AnalysisPayload {
     pub candidates: Vec<String>,
 }
 
+/// One flattened finding — a single expansion match, an inline extraction, or
+/// an unresolved candidate. This is the unit of structured output: `-j` is a
+/// pretty array of `Finding`s, `-J` is one per line, and the shape is identical
+/// whether the input was a single blob or a streamed line. Per-kind fields are
+/// omitted when absent (a candidate is just `{kind, acronym}`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Finding {
+    /// `"expansion"`, `"extraction"`, or `"candidate"`.
+    pub kind: String,
+    pub acronym: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub expansion: Option<String>,
+    /// The single trust score for this expansion here. (Provenance/`validity` is
+    /// an internal prior that feeds this — not a separate output field.)
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub confidence: Option<f32>,
+    /// Extractions only: which learning rule matched (e.g. `"alpha"`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub pattern_type: Option<String>,
+}
+
 /// What a running daemon reports for `ae --status`. CLI-side facts (whether a
 /// daemon answered at all, the socket/db paths checked) are added at render time.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -77,5 +98,42 @@ impl AnalysisPayload {
     /// True when nothing was expanded, extracted, or seen as a candidate.
     pub fn is_empty(&self) -> bool {
         self.expansions.is_empty() && self.extractions.is_empty() && self.candidates.is_empty()
+    }
+
+    /// Flatten into the canonical [`Finding`] list — one per expansion match,
+    /// extraction, and candidate. The single source of structured output, so
+    /// every mode (single/stream, `-j`/`-J`) serializes the same shape.
+    pub fn findings(&self) -> Vec<Finding> {
+        let mut out = Vec::new();
+        for e in &self.expansions {
+            for m in &e.matches {
+                out.push(Finding {
+                    kind: "expansion".into(),
+                    acronym: e.acronym.clone(),
+                    expansion: Some(m.expansion.clone()),
+                    confidence: Some(m.confidence),
+                    pattern_type: None,
+                });
+            }
+        }
+        for c in &self.extractions {
+            out.push(Finding {
+                kind: "extraction".into(),
+                acronym: c.acronym.clone(),
+                expansion: Some(c.extracted_definition.clone()),
+                confidence: Some(c.confidence),
+                pattern_type: Some(c.pattern_type.clone()),
+            });
+        }
+        for acronym in &self.candidates {
+            out.push(Finding {
+                kind: "candidate".into(),
+                acronym: acronym.clone(),
+                expansion: None,
+                confidence: None,
+                pattern_type: None,
+            });
+        }
+        out
     }
 }
