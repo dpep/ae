@@ -734,3 +734,29 @@ fn ignore_makes_an_acronym_inert_and_unignore_restores_it() {
             .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
     );
 }
+
+#[test]
+fn adding_an_expansion_unmutes_an_ignored_acronym() {
+    let sock = scratch_socket("addunmute");
+
+    // Mute OKR, confirm it's inert.
+    assert!(run(&sock, &["ignore", "OKR"], None).success);
+    let muted = run(&sock, &["-j"], Some("check the OKR"));
+    let mv: Vec<serde_json::Value> = serde_json::from_str(&muted.stdout).unwrap();
+    assert!(!mv.iter().any(|f| f["acronym"] == "OKR"));
+
+    // Explicitly defining it reactivates it — no separate `unignore` needed.
+    assert!(run(&sock, &["add", "OKR", "Objectives and Key Results"], None).success);
+    assert!(
+        run(&sock, &["ignore", "-j"], None)
+            .stdout
+            .trim()
+            .ends_with("[]")
+    );
+    let after = run(&sock, &["-j"], Some("check the OKR"));
+    let av: Vec<serde_json::Value> = serde_json::from_str(&after.stdout).unwrap();
+    assert!(
+        av.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
+}
