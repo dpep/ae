@@ -98,10 +98,20 @@ ae add PB&J                           # declare a token as an acronym (ae mines 
 ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
 ae define MVP                         # promote interactively (fzf), or pass expansions
 ae prune                              # GC: spell-fix + dedup (prefix+fuzzy) + drop noise
+ae ignore IOS                         # mute: keep it but make it inert (unignore reverses)
+ae ignore                             # list muted acronyms
+ae rm MVP                             # delete it outright (ignore mutes; rm removes)
 ```
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
 learns; `ae add … -q` adds without printing).
+
+`ignore` (alias `mute`) is for acronym-shaped tokens you never want surfaced or
+mined — e.g. an all-caps word a colleague keeps shouting. The entry stays in the
+DB but is left out of expansion, mining, suggestions, and candidate flagging
+until `unignore`. That's the difference from `rm`, which deletes outright.
+Fully-capitalized lines are also skipped automatically: with no lowercase to
+contrast against, an all-caps sentence would otherwise flag every short word.
 
 Each acronym has a **provenance**: `declared` (you said it's an acronym, via
 `ae add ACR` with no expansion) or `seen` (ae noticed it). An acronym joins the

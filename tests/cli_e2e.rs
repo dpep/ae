@@ -666,3 +666,71 @@ fn logs_go_to_stderr_not_stdout() {
     assert!(out.success, "stderr: {}", out.stderr);
     serde_json::from_str::<serde_json::Value>(&out.stdout).expect("stdout stayed pristine JSON");
 }
+
+#[test]
+fn all_caps_input_is_not_flagged_as_acronyms() {
+    let sock = scratch_socket("allcaps");
+    // A shouted, all-caps line: every word is acronym-shaped, but with no
+    // lowercase contrast none should be flagged as a candidate.
+    let out = run(&sock, &["-j"], Some("SHIP THE NEW MVP TODAY"));
+    assert!(out.success, "stderr: {}", out.stderr);
+    let v: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    assert!(
+        !v.iter().any(|f| f["kind"] == "candidate"),
+        "all-caps flooded candidates: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn ignore_makes_an_acronym_inert_and_unignore_restores_it() {
+    let sock = scratch_socket("ignore");
+
+    // Baseline: OKR (seeded) expands.
+    let before = run(&sock, &["-j"], Some("check the OKR"));
+    let bv: Vec<serde_json::Value> = serde_json::from_str(&before.stdout).unwrap();
+    assert!(
+        bv.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
+
+    // Mute it (machine status), then it no longer surfaces at all.
+    let ig = run(&sock, &["ignore", "OKR", "-j"], None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&ig.stdout).unwrap()["status"],
+        "ignored"
+    );
+    let muted = run(&sock, &["-j"], Some("check the OKR"));
+    let mv: Vec<serde_json::Value> = serde_json::from_str(&muted.stdout).unwrap();
+    assert!(
+        !mv.iter().any(|f| f["acronym"] == "OKR"),
+        "OKR still surfaced while ignored: {}",
+        muted.stdout
+    );
+
+    // It's listed by `ignore` with no argument...
+    let list = run(&sock, &["ignore", "-j"], None);
+    let lv: Vec<serde_json::Value> = serde_json::from_str(&list.stdout).unwrap();
+    assert!(lv.iter().any(|r| r["acronym"] == "OKR"));
+
+    // ...but the entry was not deleted — `show` still has the expansion.
+    let show = run(&sock, &["show", "OKR", "-j"], None);
+    let sv: Vec<serde_json::Value> = serde_json::from_str(&show.stdout).unwrap();
+    assert!(
+        sv.iter()
+            .any(|r| r["expansion"] == "Objectives and Key Results")
+    );
+
+    // Un-mute restores expansion.
+    let un = run(&sock, &["unignore", "OKR", "-j"], None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&un.stdout).unwrap()["status"],
+        "unignored"
+    );
+    let after = run(&sock, &["-j"], Some("check the OKR"));
+    let av: Vec<serde_json::Value> = serde_json::from_str(&after.stdout).unwrap();
+    assert!(
+        av.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
+    );
+}

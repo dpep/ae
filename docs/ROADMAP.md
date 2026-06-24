@@ -125,9 +125,17 @@ commit.
       manual edits (its in-memory trie is hydrated at start)
 - [x] `ae rm <ACR> [substring] [--all]` — removes the only expansion, or one
       picked by substring; refuses (and lists) when ambiguous; `--all` removes all
+- [x] `ae ignore <ACR>` (alias `mute`) / `ae unignore <ACR>` — mute an acronym
+      without deleting it: kept in the DB (`ignored_acronyms` table) but inert,
+      left out of the expansion trie, mining/watch list, suggestions, and
+      candidate surfacing until un-muted. `ae ignore` with no argument lists the
+      muted ones. The mute filter is applied at request time, so a warm daemon
+      honors it without `--stop`
 - [x] candidate tracking — every analysis (not read-only) records undefined
       acronym-shaped tokens with occurrence counts (`candidate_acronyms` table);
-      defining an acronym clears it. Surfaced via `ae candidates`
+      defining an acronym clears it. Surfaced via `ae candidates`. An all-caps
+      line (no lowercase contrast) surfaces no candidates — casing carries no
+      acronym signal there, so it isn't treated as a flood of them
 - [x] speculative expansion mining — when a candidate appears in text, scan the
       same text for consecutive word-sequences whose initials spell it (no
       parens) and count recurrences (`potential_expansions`); `ae suggest [ACR]`
