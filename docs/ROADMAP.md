@@ -245,6 +245,9 @@ candidate).
 - [ ] Confidence calibration for learned candidates from real corpora.
 - [ ] Homebrew: validate the formula's ONNX-Runtime (load-dynamic) build and
       first-run model fetch on a clean machine (sandbox network constraints).
+      The `tokenizers` regex backend is now pure-Rust (`fancy-regex`, not the
+      Oniguruma C `onig`), so the formula no longer needs `depends_on "llvm"` —
+      drop it from the tap; bundled SQLite is the only remaining C compile.
 
 ## Known bugs
 
