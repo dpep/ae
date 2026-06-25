@@ -775,6 +775,41 @@ impl Store {
         )
     }
 
+    /// Write a consistent single-file snapshot of the database to `path`
+    /// (SQLite `VACUUM INTO`), independent of WAL state — the backup `rm --all`
+    /// takes before wiping, and `restore` reads back. `path`'s parent must exist.
+    pub fn backup_to(&self, path: &std::path::Path) -> Result<()> {
+        self.conn
+            .execute("VACUUM INTO ?1", params![path.to_string_lossy()])?;
+        Ok(())
+    }
+
+    /// Wipe every table — dictionary, contexts, candidates, speculation, and the
+    /// mute list. The built-in defaults re-seed on the next open, so this is a
+    /// factory reset. Returns `(dictionary_rows, candidate_rows)` cleared, for
+    /// reporting. `rm --all` calls this *after* [`Self::backup_to`].
+    pub fn clear_all(&self) -> Result<(i64, i64)> {
+        let entries: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM acronym_dictionary", [], |row| {
+                    row.get(0)
+                })?;
+        let candidates: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM candidate_acronyms", [], |row| {
+                    row.get(0)
+                })?;
+        self.conn.execute_batch(
+            "DELETE FROM acronym_contexts;
+             DELETE FROM acronym_dictionary;
+             DELETE FROM candidate_contexts;
+             DELETE FROM candidate_acronyms;
+             DELETE FROM ignored_acronyms;
+             DELETE FROM meta;",
+        )?;
+        Ok((entries, candidates))
+    }
+
     /// Attach a compressed (64-d) context embedding to a dictionary entry.
     pub fn add_context(&self, acronym_id: i64, embedding: &[f32]) -> Result<()> {
         debug_assert_eq!(embedding.len(), MRL_DIMS);
@@ -1177,6 +1212,40 @@ mod tests {
             .unwrap();
         assert!(s.ignored_acronyms().unwrap().is_empty());
         assert!(s.all_acronyms().unwrap().contains(&"MVP".to_string()));
+    }
+
+    #[test]
+    fn backup_snapshots_data_then_clear_all_wipes_it() {
+        let s = Store::open_in_memory().unwrap();
+        s.add_entry("MVP", "Minimum Viable Product", "user")
+            .unwrap();
+        s.record_candidate("XYZ").unwrap();
+        s.ignore_acronym("API").unwrap();
+
+        // Snapshot to a temp file.
+        let dir = std::env::temp_dir().join(format!("ae-storetest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let backup = dir.join("snap.db");
+        let _ = std::fs::remove_file(&backup);
+        s.backup_to(&backup).unwrap();
+
+        // Wipe clears every table and reports what it removed.
+        let (entries, candidates) = s.clear_all().unwrap();
+        assert!(entries >= 1 && candidates >= 1);
+        assert_eq!(s.count().unwrap(), 0);
+        assert!(s.candidates().unwrap().is_empty());
+        assert!(s.ignored_acronyms().unwrap().is_empty());
+
+        // The snapshot still holds the pre-wipe state.
+        let restored = Store::open(&backup).unwrap();
+        assert_eq!(restored.expansions_for("MVP").unwrap().len(), 1);
+        assert!(
+            restored
+                .ignored_acronyms()
+                .unwrap()
+                .contains(&"API".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -125,6 +125,12 @@ commit.
       manual edits (its in-memory trie is hydrated at start)
 - [x] `ae rm <ACR> [substring] [--all]` — removes the only expansion, or one
       picked by substring; refuses (and lists) when ambiguous; `--all` removes all
+- [x] `ae rm --all` (no acronym) / `ae rm --restore [PATH]` — wipe the whole
+      dictionary (factory reset: built-in defaults re-seed) and recover it.
+      Instead of a confirmation prompt, the wipe first writes a timestamped
+      `VACUUM INTO` snapshot to `/tmp/ae/backup_<ts>.db`; `--restore` swaps it
+      back (most recent if no path), snapshotting the current state first so it's
+      reversible
 - [x] `ae ignore <ACR>` (alias `mute`) / `ae unignore <ACR>` — mute an acronym
       without deleting it: kept in the DB (`ignored_acronyms` table) but inert,
       left out of the expansion trie, mining/watch list, suggestions, and
