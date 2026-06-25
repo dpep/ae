@@ -101,10 +101,18 @@ ae prune                              # GC: spell-fix + dedup (prefix+fuzzy) + d
 ae ignore IOS                         # mute: keep it but make it inert (unignore reverses)
 ae ignore                             # list muted acronyms
 ae rm MVP                             # delete it outright (ignore mutes; rm removes)
+ae rm --all                           # wipe the whole dictionary (backed up first)
+ae rm --restore                       # restore the most recent backup (or pass a path)
 ```
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
 learns; `ae add … -q` adds without printing).
+
+`rm --all` (no acronym) clears the entire dictionary and resets to the built-in
+defaults. It isn't gated by a prompt — instead it first writes a timestamped
+snapshot to `/tmp/ae/backup_<ts>.db`, and `ae rm --restore [PATH]` brings it back
+(with no path, the most recent backup; the pre-restore state is itself snapshotted,
+so a restore is reversible).
 
 `ignore` (alias `mute`) is for acronym-shaped tokens you never want surfaced or
 mined — e.g. an all-caps word a colleague keeps shouting. The entry stays in the

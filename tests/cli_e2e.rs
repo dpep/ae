@@ -736,6 +736,47 @@ fn ignore_makes_an_acronym_inert_and_unignore_restores_it() {
 }
 
 #[test]
+fn rm_all_wipes_with_a_backup_and_restore_recovers() {
+    let sock = scratch_socket("wipeall");
+    assert!(run(&sock, &["add", "MVP", "Minimum Viable Product"], None).success);
+
+    // `rm --all` (no acronym) wipes everything, reporting a backup path.
+    let wiped = run(&sock, &["rm", "--all", "-j"], None);
+    assert!(wiped.success, "stderr: {}", wiped.stderr);
+    let wv: serde_json::Value = serde_json::from_str(&wiped.stdout).unwrap();
+    assert_eq!(wv["status"], "cleared");
+    let backup = wv["backup"].as_str().unwrap().to_string();
+    assert!(
+        std::path::Path::new(&backup).is_file(),
+        "backup file missing: {backup}"
+    );
+
+    // MVP is gone; the built-in defaults re-seed (factory reset).
+    let after = run(&sock, &["list", "-j"], None);
+    let av: Vec<serde_json::Value> = serde_json::from_str(&after.stdout).unwrap();
+    assert!(!av.iter().any(|r| r["acronym"] == "MVP"));
+    assert!(av.iter().any(|r| r["acronym"] == "OKR"));
+
+    // Restoring the backup brings MVP back.
+    let restored = run(&sock, &["rm", "--restore", backup.as_str(), "-j"], None);
+    assert!(restored.success, "stderr: {}", restored.stderr);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&restored.stdout).unwrap()["status"],
+        "restored"
+    );
+    let relist = run(&sock, &["list", "-j"], None);
+    let rv: Vec<serde_json::Value> = serde_json::from_str(&relist.stdout).unwrap();
+    assert!(rv.iter().any(|r| r["acronym"] == "MVP"));
+    let _ = std::fs::remove_file(&backup);
+}
+
+#[test]
+fn rm_with_no_acronym_and_no_all_is_an_error() {
+    let sock = scratch_socket("rmnoargs");
+    assert!(!run(&sock, &["rm"], None).success);
+}
+
+#[test]
 fn adding_an_expansion_unmutes_an_ignored_acronym() {
     let sock = scratch_socket("addunmute");
 

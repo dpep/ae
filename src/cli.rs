@@ -4,8 +4,9 @@
 //! piping `ae` always gets clean output.
 
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -178,14 +179,22 @@ pub enum Command {
     },
     /// Remove an acronym. Bare `rm ACR` removes it when there's one expansion;
     /// otherwise pass a substring to pick one, or `--all` to remove every one.
+    /// `rm --all` with no acronym wipes the whole dictionary (a timestamped
+    /// backup is saved under /tmp/ae first); `rm --restore [PATH]` brings it back.
     #[command(visible_alias = "delete")]
     Rm {
-        acronym: String,
+        acronym: Option<String>,
         /// Expansion substring selecting one variant when several exist.
         expansion: Option<String>,
-        /// Remove every expansion of the acronym.
+        /// With an acronym: remove every expansion of it. With no acronym: wipe
+        /// the entire dictionary (backed up first).
         #[arg(short, long)]
         all: bool,
+        /// Restore the dictionary from a backup made by `--all` (the most recent
+        /// one if no path is given). The current state is backed up first, so a
+        /// restore is reversible.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with_all = ["all", "acronym", "expansion"])]
+        restore: Option<Option<PathBuf>>,
     },
     /// Mute an acronym: keep it (and any expansions) in the dictionary but make
     /// it inert — left out of expansion, mining, suggestions, and candidate
@@ -500,7 +509,22 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             acronym,
             expansion,
             all,
-        } => run_rm(&store, fmt, quiet, acronym, expansion.as_deref(), *all),
+            restore,
+        } => {
+            // `--restore` overwrites the DB file, so it takes ownership of
+            // `store` to close the connection first.
+            if let Some(path) = restore {
+                return run_restore(store, cli, fmt, quiet, path.as_deref());
+            }
+            run_rm(
+                &store,
+                fmt,
+                quiet,
+                acronym.as_deref(),
+                expansion.as_deref(),
+                *all,
+            )
+        }
         Command::Ignore { acronym } => run_ignore(&store, fmt, quiet, acronym.as_deref()),
         Command::Unignore { acronym } => run_unignore(&store, fmt, quiet, acronym),
     }
@@ -818,14 +842,26 @@ fn pick_numbered(acronym: &str, suggestions: &[(String, f32)]) -> Option<Vec<Str
 }
 
 /// Resolve and execute a removal, disambiguating among multiple expansions.
+/// With no acronym, `--all` wipes the whole dictionary (after a backup).
 fn run_rm(
     store: &crate::store::Store,
     fmt: Format,
     quiet: bool,
-    acronym: &str,
+    acronym: Option<&str>,
     pattern: Option<&str>,
     all: bool,
 ) -> ExitCode {
+    let acronym = match acronym {
+        Some(a) => a,
+        // No acronym: `--all` is the whole-dictionary wipe; otherwise nothing to do.
+        None if all => return run_wipe_all(store, fmt, quiet),
+        None => {
+            return fail(
+                fmt,
+                "specify an acronym to remove, or --all to clear everything",
+            );
+        }
+    };
     let variants = match store.expansions_for(acronym) {
         Ok(v) => v,
         Err(e) => return fail(fmt, &format!("delete failed: {e}")),
@@ -878,6 +914,138 @@ fn run_rm(
         }
     }
     removed_status(fmt, quiet, &acronym, removed)
+}
+
+/// Wipe the whole dictionary (`rm --all`, no acronym). A timestamped backup is
+/// saved under /tmp/ae first so the wipe is recoverable via `rm --restore`; the
+/// built-in defaults re-seed on the next open (a factory reset).
+fn run_wipe_all(store: &crate::store::Store, fmt: Format, quiet: bool) -> ExitCode {
+    let backup = match snapshot(store) {
+        Ok(p) => p,
+        Err(e) => return fail(fmt, &format!("backup failed: {e}")),
+    };
+    let (entries, candidates) = match store.clear_all() {
+        Ok(counts) => counts,
+        Err(e) => return fail(fmt, &format!("wipe failed: {e}")),
+    };
+    if !quiet {
+        match fmt {
+            Format::Human => println!(
+                "ae: cleared {entries} entries and {candidates} candidates — backup saved to {}",
+                backup.display()
+            ),
+            _ => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "cleared",
+                    "entries": entries,
+                    "candidates": candidates,
+                    "backup": backup.display().to_string(),
+                })
+            ),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Restore the dictionary from a backup. The current state is snapshotted first
+/// (so a restore is itself reversible), then the chosen backup replaces the live
+/// DB file. Takes ownership of `store` to close the connection before the swap.
+fn run_restore(
+    store: crate::store::Store,
+    cli: &Cli,
+    fmt: Format,
+    quiet: bool,
+    backup: Option<&Path>,
+) -> ExitCode {
+    let db = cli.db_path();
+    let src = match backup {
+        Some(p) => p.to_path_buf(),
+        None => match latest_backup() {
+            Some(p) => p,
+            None => {
+                return fail(
+                    fmt,
+                    &format!("no backups found in {}", backup_dir().display()),
+                );
+            }
+        },
+    };
+    if !src.is_file() {
+        return fail(fmt, &format!("backup not found: {}", src.display()));
+    }
+    // Snapshot the current state first, so the restore can be undone.
+    let prior = match snapshot(&store) {
+        Ok(p) => p,
+        Err(e) => return fail(fmt, &format!("backup failed: {e}")),
+    };
+    // Close the live connection before swapping the file underneath it.
+    drop(store);
+    if let Err(e) = std::fs::copy(&src, &db) {
+        return fail(fmt, &format!("restore failed: {e}"));
+    }
+    // Drop stale WAL/SHM sidecars so the restored DB is read exactly as copied.
+    for suffix in ["-wal", "-shm"] {
+        let mut p = db.clone().into_os_string();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+    if !quiet {
+        match fmt {
+            Format::Human => println!(
+                "ae: restored from {} (prior state backed up to {})",
+                src.display(),
+                prior.display()
+            ),
+            _ => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "restored",
+                    "from": src.display().to_string(),
+                    "backup": prior.display().to_string(),
+                })
+            ),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Directory holding `rm --all` / `rm --restore` backups, alongside the default
+/// socket under /tmp, so snapshots don't clutter the working tree.
+fn backup_dir() -> PathBuf {
+    PathBuf::from("/tmp/ae")
+}
+
+/// Write a timestamped snapshot of the database's current contents to
+/// `/tmp/ae/backup_<ts>.db`. Returns the backup path.
+fn snapshot(store: &crate::store::Store) -> rusqlite::Result<PathBuf> {
+    let dir = backup_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    // Sub-second component keeps concurrent snapshots from colliding.
+    let path = dir.join(format!(
+        "backup_{}-{:09}.db",
+        now.as_secs(),
+        now.subsec_nanos()
+    ));
+    store.backup_to(&path)?;
+    Ok(path)
+}
+
+/// The most recent backup (by modified time), or `None` if there are none —
+/// used by `rm --restore` with no explicit path.
+fn latest_backup() -> Option<PathBuf> {
+    std::fs::read_dir(backup_dir())
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("backup_") && n.ends_with(".db"))
+        })
+        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
 fn removed_status(fmt: Format, quiet: bool, acronym: &str, n: usize) -> ExitCode {
