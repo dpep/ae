@@ -158,7 +158,9 @@ impl Store {
 
     /// Insert an `(acronym, expansion)` pair from `source` (`"user"`, `"inline"`,
     /// or `"mined"`), returning its row id. Idempotent; a re-add only *upgrades*
-    /// the source if the new one is stronger (mined < inline < user).
+    /// the source if the new one is stronger (mined < inline < user). Defining a
+    /// confirmed expansion also un-mutes the acronym — an explicit definition
+    /// reactivates one that had been ignored.
     pub fn add_entry(&self, acronym: &str, expansion: &str, source: &str) -> Result<i64> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim();
@@ -177,8 +179,10 @@ impl Store {
                 params![acronym, expansion, source],
             )?;
         }
-        // It's confirmed now, so it's no longer an open candidate / speculation.
+        // It's confirmed now, so it's no longer an open candidate / speculation,
+        // nor muted — an explicit definition reactivates an ignored acronym.
         self.clear_candidate(&acronym)?;
+        self.unignore_acronym(&acronym)?;
         self.conn.query_row(
             "SELECT id FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
             params![acronym, expansion],
@@ -1161,6 +1165,18 @@ mod tests {
         assert!(s.candidates().unwrap().iter().all(|(a, _)| a != "MVP"));
         // ...confirmed expansion kept.
         assert_eq!(s.expansions_for("MVP").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn adding_an_expansion_unmutes_an_ignored_acronym() {
+        let s = Store::open_in_memory().unwrap();
+        s.ignore_acronym("MVP").unwrap();
+        assert!(s.ignored_acronyms().unwrap().contains(&"MVP".to_string()));
+        // An explicit definition reactivates it.
+        s.add_entry("mvp", "Minimum Viable Product", "user")
+            .unwrap();
+        assert!(s.ignored_acronyms().unwrap().is_empty());
+        assert!(s.all_acronyms().unwrap().contains(&"MVP".to_string()));
     }
 
     #[test]
