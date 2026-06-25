@@ -320,9 +320,15 @@ impl Engine {
         for acronym in candidates {
             present.insert(acronym);
         }
+        // Present-trie hits are *same-sentence* co-occurrences: the acronym
+        // appeared as a candidate in this very text alongside the phrase that
+        // spells it. That's first-hand evidence, stronger than a cross-text
+        // (base-trie) guess, so it earns full coherence credit.
+        let present_matches: std::collections::HashSet<(String, String)> =
+            present.mine(text).into_iter().collect();
         let mut matches: std::collections::HashSet<(String, String)> =
             base.mine(text).into_iter().collect();
-        matches.extend(present.mine(text));
+        matches.extend(present_matches.iter().cloned());
 
         // Route each match: a recurrence of a *known* expansion strengthens its
         // context; anything else is a (new or already-speculative) alternative.
@@ -342,7 +348,12 @@ impl Engine {
                     self.store.add_context(*id, &ctx)?;
                 }
                 None => {
-                    let coherence = self.context_coherence(&acronym, query_vec)?;
+                    let coherence = if present_matches.contains(&(acronym.clone(), phrase.clone()))
+                    {
+                        SAME_SENTENCE_COHERENCE
+                    } else {
+                        self.context_coherence(&acronym, query_vec)?
+                    };
                     self.store.record_potential(&acronym, &phrase, coherence)?;
                 }
             }
@@ -415,6 +426,12 @@ fn is_filler(word: &str) -> bool {
 /// How many words past the anchor a single match may span — bounds how many
 /// fillers we'll skip while spelling out an acronym.
 const MAX_MINE_SPAN: usize = 12;
+
+/// Coherence credited to a *same-sentence* mined expansion — one whose acronym
+/// appeared in the very text that spells it out. The co-occurrence is direct
+/// evidence, so it gets the maximum (1.0), ranking it above cross-text guesses
+/// in `suggest` without being promoted to a confident extraction.
+const SAME_SENTENCE_COHERENCE: f32 = 1.0;
 
 /// A trie of acronyms keyed by their letters (punctuation stripped, so `PB&J`
 /// keys as `PBJ`), used to mine a whole text for *every* stored acronym's
@@ -886,6 +903,29 @@ mod tests {
         // ...and with no grace it's dropped.
         e.consolidate(0.9, 0).unwrap();
         assert!(e.potentials_for("MVP").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_same_sentence_spelling_gets_full_coherence_credit() {
+        let e = Engine::in_memory().unwrap();
+        e.declare_acronym("PQR").unwrap();
+        // Prior, unrelated context — so a cross-text mention would score the
+        // current text's coherence below 1.0.
+        e.analyze("the PQR project timeline shifted").unwrap();
+        // Same sentence: the acronym token co-occurs with a phrase spelling it,
+        // so the mined suggestion is credited maximal coherence (1.0). Read the
+        // raw coh_sum from the store (the Engine accessor drops it).
+        e.analyze("our PQR is the peaceful quiet retreat").unwrap();
+        let pots = e.store.potentials_for("PQR").unwrap();
+        let (_, count, coh) = pots
+            .iter()
+            .find(|(p, _, _)| p == "peaceful quiet retreat")
+            .expect("mined the same-sentence spelling");
+        assert_eq!(*count, 1);
+        assert!(
+            (*coh - 1.0).abs() < 1e-6,
+            "same-sentence coherence should be 1.0, got {coh}"
+        );
     }
 
     #[test]

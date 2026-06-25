@@ -170,4 +170,23 @@ mod tests {
         assert!(acros.contains(&"KPI"));
         assert!(acros.contains(&"OKR"));
     }
+
+    #[test]
+    fn both_orders_handle_a_casual_lowercase_expansion() {
+        // Acronym-first (alpha) and definition-first (beta), with a lowercase
+        // non-title-case expansion — initials still spell the acronym → strong.
+        let alpha = extract("Remember ABC (always be cleaning) on every shift.");
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].acronym, "ABC");
+        assert_eq!(alpha[0].extracted_definition, "always be cleaning");
+        assert_eq!(alpha[0].pattern_type, "alpha");
+        assert_eq!(alpha[0].confidence, STRONG);
+
+        let beta = extract("The mantra is always be cleaning (ABC) here.");
+        assert_eq!(beta.len(), 1);
+        assert_eq!(beta[0].acronym, "ABC");
+        assert_eq!(beta[0].extracted_definition, "always be cleaning");
+        assert_eq!(beta[0].pattern_type, "beta");
+        assert_eq!(beta[0].confidence, STRONG);
+    }
 }
