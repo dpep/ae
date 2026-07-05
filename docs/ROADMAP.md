@@ -146,7 +146,10 @@ commit.
       same text for consecutive word-sequences whose initials spell it (no
       parens) and count recurrences (`potential_expansions`); `ae suggest [ACR]`
       ranks them with confidence (share of the acronym's sightings). Defining an
-      acronym clears its suggestions
+      acronym clears its suggestions. A *same-sentence* hit (the acronym token
+      co-occurs with the phrase that spells it) is credited maximal coherence, so
+      it outranks cross-text guesses — but stays speculative, not a confident
+      extraction (a non-parenthetical match is too noisy to auto-define)
 
 - [x] filler-tolerant mining — match the acronym as a subsequence over words,
       skipping a closed set of fillers (OKR = Objectives *and* Key Results) yet
