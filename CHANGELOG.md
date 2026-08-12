@@ -13,6 +13,11 @@ releases are grouped at the end.
   first.
 - Acronyms can be ignored/muted, with a guard against all-caps candidate
   floods; `add` un-mutes an ignored acronym when it's explicitly defined.
+- Candidates are no longer mined from identifiers, paths and shell variables.
+  `CLAUDE_PLUGIN_ROOT` was being split into `CLAUDE`/`PLUGIN`/`ROOT`, `$HOME`
+  into `HOME` and `SKILL.md` into `SKILL` — every fragment acronym-shaped. If
+  you have streamed command output into `ae`, expect existing junk candidates
+  to remain (nothing is deleted); `ae ignore` mutes them individually.
 
 ## 0.5.3 — 2026-06-24
 - Pure-Rust regex backend (`fancy-regex`), dropping the Oniguruma C dependency

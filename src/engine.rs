@@ -565,16 +565,58 @@ fn candidate_acronyms(
             out.push(token.to_string());
         }
     }
-    for token in tokens(text) {
-        let upper = token.to_uppercase();
-        if !is_acronym_shaped(token) || covered.contains(&upper) || ignored.contains(&upper) {
+    // Tokenize per word, so an identifier can be skipped whole. Splitting the
+    // full text first would have already shattered `CLAUDE_PLUGIN_ROOT` into
+    // three plausible-looking acronyms.
+    for word in text.split_whitespace() {
+        if is_identifier_word(word) {
             continue;
         }
-        if !resolved.contains(&upper) && seen.insert(upper) {
-            out.push(token.to_string());
+        for token in tokens(word) {
+            let upper = token.to_uppercase();
+            if !is_acronym_shaped(token) || covered.contains(&upper) || ignored.contains(&upper) {
+                continue;
+            }
+            if !resolved.contains(&upper) && seen.insert(upper) {
+                out.push(token.to_string());
+            }
         }
     }
     out
+}
+
+/// True when a whitespace-delimited word is an identifier, path, or shell
+/// variable rather than prose — so its uppercase runs are structure, not
+/// acronyms.
+///
+/// Tokenizing splits on every non-alphanumeric, which turns
+/// `CLAUDE_PLUGIN_ROOT` into `CLAUDE`/`PLUGIN`/`ROOT`, `$HOME` into `HOME` and
+/// `SKILL.md` into `SKILL`. Each fragment is 2–6 uppercase letters, so each
+/// looks exactly like an acronym. Streaming command output past this produces
+/// hundreds of candidates that were never words.
+fn is_identifier_word(word: &str) -> bool {
+    // $HOME, ${HOME} — a variable reference, not a mention.
+    if word.starts_with('$') || word.contains("${") {
+        return true;
+    }
+    // MIN_CONFIDENCE, snake_case — underscores never join two prose words.
+    if word.contains('_') {
+        return true;
+    }
+    // plugins/code/SKILL, C:\Users — a path.
+    if word.contains('/') || word.contains('\\') {
+        return true;
+    }
+    // SKILL.md, config.API.url — a dot binding two parts together. A trailing
+    // dot is sentence punctuation ("we shipped the MVP.") and doesn't count,
+    // which is why this needs the character after it.
+    let chars: Vec<char> = word.chars().collect();
+    chars.iter().enumerate().any(|(i, c)| {
+        *c == '.'
+            && chars
+                .get(i + 1)
+                .is_some_and(|next| next.is_ascii_alphanumeric())
+    })
 }
 
 /// True when `text` has multiple words and not a single lowercase letter — the
@@ -991,6 +1033,39 @@ mod tests {
                 .candidates
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn identifier_fragments_are_not_candidates() {
+        let e = Engine::in_memory().unwrap();
+        // Every uppercase run here is part of a larger identifier. Splitting on
+        // non-alphanumerics turns each into an acronym-shaped token, which is
+        // how streaming command output produced hundreds of junk candidates.
+        let out = e
+            .analyze("export CLAUDE_PLUGIN_ROOT=$HOME/x and read plugins/rq/SKILL.md")
+            .unwrap();
+        assert!(out.candidates.is_empty(), "got {:?}", out.candidates);
+        assert!(e.candidate_counts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_real_acronym_beside_an_identifier_still_counts() {
+        let e = Engine::in_memory().unwrap();
+        // The filter is per word, so one path doesn't mute the whole line.
+        // ZQX is unseeded, so it can only show up as a candidate.
+        let out = e
+            .analyze("the ZQX is tracked in src/DIR_NAME/x.rs")
+            .unwrap();
+        assert_eq!(out.candidates, vec!["ZQX".to_string()]);
+    }
+
+    #[test]
+    fn a_sentence_final_acronym_is_not_mistaken_for_a_filename() {
+        let e = Engine::in_memory().unwrap();
+        // "MVP." ends a sentence; only a dot *binding two parts* marks an
+        // identifier, so the trailing period must not disqualify it.
+        let out = e.analyze("we finally shipped the MVP.").unwrap();
+        assert_eq!(out.candidates, vec!["MVP".to_string()]);
     }
 
     #[test]
