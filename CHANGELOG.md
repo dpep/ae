@@ -8,6 +8,13 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
+- Underscores no longer split tokens, so `MIN_CONFIDENCE` stays one word rather
+  than becoming the candidate `MIN`. A wrapping underscore is still punctuation,
+  so markdown emphasis (`_API_`) reads as the acronym.
+- A daemon serving a different database than `--db`/`$AE_DB` asked for is no
+  longer used: the request is evaluated in-process against the database you
+  named, with a warning. It previously answered from its own dictionary,
+  silently. `ae --status` now reports which database the daemon holds.
 
 ## 0.6.0 — 2026-08-11
 - Mining credits same-sentence acronym/expansion co-occurrences.

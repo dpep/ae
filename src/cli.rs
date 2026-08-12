@@ -295,16 +295,52 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Serve one chunk of text: proxy to the daemon if one is up, else self-heal by
-/// evaluating in-process, then render the result.
+/// Whether a running daemon is holding the dictionary this invocation asked
+/// for.
+///
+/// A daemon opens one database and keeps it for its whole life. Proxying to it
+/// regardless means `--db other.db` gets answered out of the daemon's
+/// dictionary — the wrong data, silently, with no error to notice. Asking for
+/// a specific database and getting a different one is worse than being slow.
+///
+/// Only checked when a database was actually requested. Without `--db`/`$AE_DB`
+/// there's nothing to conflict with, and the common path stays one round trip.
+fn daemon_serves_requested_db(cli: &Cli) -> bool {
+    if cli.db.is_none() {
+        return true;
+    }
+    let Ok(Some(status)) = ipc::status(&cli.socket) else {
+        return true; // no daemon answering; run_follower will self-heal
+    };
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a.canonicalize().unwrap_or_else(|_| a.to_path_buf())
+            == b.canonicalize().unwrap_or_else(|_| b.to_path_buf())
+    };
+    if same(std::path::Path::new(&status.db), &cli.db_path()) {
+        return true;
+    }
+    log::warn!(
+        "daemon (pid {}) is serving {}, not {} — evaluating in-process",
+        status.pid,
+        status.db,
+        cli.db_path().display()
+    );
+    false
+}
+
+/// Serve one chunk of text: proxy to the daemon if one is up and holds the
+/// requested dictionary, else self-heal by evaluating in-process, then render.
 fn serve_text(cli: &Cli, fmt: Format, text: &str) -> ExitCode {
-    let payload = match ipc::run_follower(&cli.socket, text, cli.read_only) {
-        Ok(p) => {
+    let proxied = daemon_serves_requested_db(cli)
+        .then(|| ipc::run_follower(&cli.socket, text, cli.read_only).ok())
+        .flatten();
+    let payload = match proxied {
+        Some(p) => {
             log::debug!("served by daemon");
             p
         }
-        Err(_) => {
-            log::debug!("no daemon; evaluating in-process");
+        None => {
+            log::debug!("evaluating in-process");
             match evaluate_in_process(cli, text) {
                 Ok(p) => p,
                 Err(e) => return fail(fmt, &format!("evaluation failed: {e}")),

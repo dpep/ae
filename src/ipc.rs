@@ -217,9 +217,12 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
         let last = last_activity.clone();
         let shutdown = shutdown.clone();
         let sock = socket.to_path_buf();
+        let served_db = db.to_path_buf();
         std::thread::spawn(move || {
             active.fetch_add(1, Ordering::SeqCst);
-            if let Err(e) = handle_connection(stream, &engine, &sock, &shutdown, started) {
+            if let Err(e) =
+                handle_connection(stream, &engine, &sock, &served_db, &shutdown, started)
+            {
                 log::warn!("connection error: {e}");
             }
             active.fetch_sub(1, Ordering::SeqCst);
@@ -271,6 +274,7 @@ fn handle_connection(
     mut stream: UnixStream,
     engine: &Mutex<Engine>,
     socket: &Path,
+    served_db: &Path,
     shutdown: &AtomicBool,
     started: Instant,
 ) -> io::Result<()> {
@@ -304,6 +308,7 @@ fn handle_connection(
                 uptime_secs: started.elapsed().as_secs(),
                 embedder: engine.lock().unwrap().embedder_kind().to_string(),
                 idle_timeout_secs: idle_timeout().as_secs(),
+                db: served_db.display().to_string(),
             };
             write_frame(&mut stream, &serde_json::to_vec(&status)?)?;
         }

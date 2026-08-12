@@ -460,6 +460,7 @@ mod tests {
             uptime_secs: 75,
             embedder: "onnx".into(),
             idle_timeout_secs: 300,
+            db: "/tmp/ae-test.db".into(),
         }
     }
 

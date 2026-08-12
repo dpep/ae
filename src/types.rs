@@ -95,6 +95,11 @@ pub struct StatusPayload {
     /// `"onnx"` (real model loaded) or `"hash"` (degraded fallback).
     pub embedder: String,
     pub idle_timeout_secs: u64,
+    /// The dictionary this daemon holds open. A daemon serves one database for
+    /// its whole life, so a client asking about a different one has to know not
+    /// to proxy — and `ae --status` should say which dictionary is live.
+    #[serde(default)]
+    pub db: String,
 }
 
 impl AnalysisPayload {

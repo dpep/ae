@@ -513,8 +513,19 @@ impl MiningTrie {
 
 /// Split text into alphanumeric tokens, preserving each token's original
 /// spelling (so `text_slice` reflects what the user wrote).
+///
+/// An underscore binds rather than separates. Splitting on it turns
+/// `MIN_CONFIDENCE` into `MIN` and `CLAUDE_PLUGIN_ROOT` into three tokens that
+/// each pass for an acronym, which is how command output floods the candidate
+/// list. Kept together, the whole identifier is too long to be acronym-shaped
+/// and falls out on its own.
+///
+/// Leading and trailing underscores are trimmed, so markdown emphasis (`_API_`)
+/// still reads as the acronym it wraps — only an underscore *between* two parts
+/// glues them.
 fn tokens(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !c.is_alphanumeric())
+    text.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|t| t.trim_matches('_'))
         .filter(|t| !t.is_empty())
 }
 
@@ -590,18 +601,15 @@ fn candidate_acronyms(
 /// variable rather than prose — so its uppercase runs are structure, not
 /// acronyms.
 ///
-/// Tokenizing splits on every non-alphanumeric, which turns
-/// `CLAUDE_PLUGIN_ROOT` into `CLAUDE`/`PLUGIN`/`ROOT`, `$HOME` into `HOME` and
-/// `SKILL.md` into `SKILL`. Each fragment is 2–6 uppercase letters, so each
-/// looks exactly like an acronym. Streaming command output past this produces
-/// hundreds of candidates that were never words.
+/// Tokenizing splits on punctuation, which turns `$HOME` into `HOME` and
+/// `SKILL.md` into `SKILL` — each 2–6 uppercase letters, so each looks exactly
+/// like an acronym. Streaming command output past this produces hundreds of
+/// candidates that were never words.
+///
+/// Underscores are handled in [`tokens`] instead, by not splitting on them.
 fn is_identifier_word(word: &str) -> bool {
     // $HOME, ${HOME} — a variable reference, not a mention.
     if word.starts_with('$') || word.contains("${") {
-        return true;
-    }
-    // MIN_CONFIDENCE, snake_case — underscores never join two prose words.
-    if word.contains('_') {
         return true;
     }
     // plugins/code/SKILL, C:\Users — a path.
@@ -1057,6 +1065,24 @@ mod tests {
         let out = e
             .analyze("the ZQX is tracked in src/DIR_NAME/x.rs")
             .unwrap();
+        assert_eq!(out.candidates, vec!["ZQX".to_string()]);
+    }
+
+    #[test]
+    fn an_underscore_binds_a_name_together_rather_than_splitting_it() {
+        let e = Engine::in_memory().unwrap();
+        // Whole identifier is 18 characters, so it can't be acronym-shaped —
+        // no need for a special case, it just stops being three tokens.
+        let out = e.analyze("we set CLAUDE_PLUGIN_ROOT here").unwrap();
+        assert!(out.candidates.is_empty(), "got {:?}", out.candidates);
+    }
+
+    #[test]
+    fn an_underscore_wrapping_an_acronym_is_not_part_of_it() {
+        let e = Engine::in_memory().unwrap();
+        // Markdown emphasis. Only an underscore *between* two parts glues them,
+        // so _ZQX_ is still the acronym it wraps.
+        let out = e.analyze("the _ZQX_ number looks wrong").unwrap();
         assert_eq!(out.candidates, vec!["ZQX".to_string()]);
     }
 
