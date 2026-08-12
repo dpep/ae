@@ -8,6 +8,8 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
+
+## 0.6.0 — 2026-08-11
 - Mining credits same-sentence acronym/expansion co-occurrences.
 - `rm --all` / `rm --restore` wipe the dictionary, taking an automatic backup
   first.
