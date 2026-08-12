@@ -14,6 +14,11 @@ pub struct MatchCandidate {
     pub expansion: String,
     pub validity: f32,
     pub confidence: f32,
+    /// Where this expansion came from — `"user"` (somebody typed it) or
+    /// `"inline"` (mined from surrounding text). Carried through to output so a
+    /// consumer can prefer curated entries; `validity` folds it into the score
+    /// but can't be inverted back into provenance.
+    pub source: String,
 }
 
 /// A known acronym found in the input, with its ranked candidate expansions.
@@ -68,6 +73,14 @@ pub struct Finding {
     /// Extractions only: which learning rule matched (e.g. `"alpha"`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pattern_type: Option<String>,
+    /// Expansions only: `"user"` or `"inline"`, matching `ae list`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub source: Option<String>,
+    /// Expansions only: whether a human put this in the dictionary. Auto-mined
+    /// entries are speculation — a consumer injecting expansions into a prompt
+    /// wants this to be true, and can't tell from confidence alone.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub verified: Option<bool>,
 }
 
 /// What a running daemon reports for `ae --status`. CLI-side facts (whether a
@@ -116,6 +129,8 @@ impl AnalysisPayload {
                     // internal ranking/diagnostic field, not a second output.
                     confidence: Some(m.validity * m.confidence),
                     pattern_type: None,
+                    source: Some(m.source.clone()),
+                    verified: Some(m.source == "user"),
                 });
             }
         }
@@ -126,6 +141,8 @@ impl AnalysisPayload {
                 expansion: Some(c.extracted_definition.clone()),
                 confidence: Some(c.confidence),
                 pattern_type: Some(c.pattern_type.clone()),
+                source: None,
+                verified: None,
             });
         }
         for acronym in &self.candidates {
@@ -135,6 +152,8 @@ impl AnalysisPayload {
                 expansion: None,
                 confidence: None,
                 pattern_type: None,
+                source: None,
+                verified: None,
             });
         }
         out

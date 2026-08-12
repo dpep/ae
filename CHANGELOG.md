@@ -13,6 +13,9 @@ releases are grouped at the end.
   first.
 - Acronyms can be ignored/muted, with a guard against all-caps candidate
   floods; `add` un-mutes an ignored acronym when it's explicitly defined.
+- Expansion findings carry `source` and `verified`, matching `ae list`. A
+  consumer deciding whether to act on an expansion can now tell a curated entry
+  from a mined guess; confidence alone never distinguished them.
 - Candidates are no longer mined from identifiers, paths and shell variables.
   `CLAUDE_PLUGIN_ROOT` was being split into `CLAUDE`/`PLUGIN`/`ROOT`, `$HOME`
   into `HOME` and `SKILL.md` into `SKILL` — every fragment acronym-shaped. If

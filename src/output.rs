@@ -330,6 +330,7 @@ mod tests {
                     expansion: "Key Performance Indicator".into(),
                     validity: 1.0,
                     confidence: 0.8,
+                    source: "user".into(),
                 }],
             }],
             extractions: vec![Extraction {
@@ -399,6 +400,7 @@ mod tests {
                     expansion: "Test Procedure Spec".into(),
                     validity: 0.9,
                     confidence: 0.8,
+                    source: "inline".into(),
                 }],
             }],
             extractions: vec![],
@@ -407,6 +409,30 @@ mod tests {
         let f = &payload.findings()[0];
         assert!((f.confidence.unwrap() - 0.72).abs() < 1e-6);
         assert!(f.kind == "expansion");
+        // Provenance survives into the finding: confidence alone can't say
+        // whether a human wrote this or ae guessed it.
+        assert_eq!(f.source.as_deref(), Some("inline"));
+        assert_eq!(f.verified, Some(false));
+    }
+
+    #[test]
+    fn only_a_user_entry_is_verified() {
+        let payload = sample(); // its expansion is source "user"
+        let f = payload
+            .findings()
+            .into_iter()
+            .find(|f| f.kind == "expansion")
+            .unwrap();
+        assert_eq!(f.source.as_deref(), Some("user"));
+        assert_eq!(f.verified, Some(true));
+        // Non-expansions carry neither field, so they stay out of the JSON.
+        let c = payload
+            .findings()
+            .into_iter()
+            .find(|f| f.kind == "extraction")
+            .unwrap();
+        assert_eq!(c.source, None);
+        assert_eq!(c.verified, None);
     }
 
     #[test]

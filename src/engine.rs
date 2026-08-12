@@ -182,6 +182,7 @@ impl Engine {
                         expansion,
                         validity: crate::store::source_validity(&source),
                         confidence: self.contextual(id, query_vec)?,
+                        source,
                     })
                 })
                 .collect::<rusqlite::Result<_>>()?;
