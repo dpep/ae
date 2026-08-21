@@ -67,6 +67,50 @@ fn connectable(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
+/// A stand-in Leader that binds the socket, accepts, and never answers — the
+/// shape of a daemon that is still warming up or has wedged. Connections are
+/// held open (closing them would hand the client an EOF, not a stall).
+fn deaf_leader(socket: &Path) -> std::thread::JoinHandle<()> {
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for conn in listener.incoming() {
+            held.push(conn);
+        }
+    })
+}
+
+/// Run a child to completion under a deadline, killing it and returning `None`
+/// on overrun — a hang fails the test instead of hanging the suite.
+fn run_bounded(mut child: std::process::Child, limit: Duration) -> Option<std::process::Output> {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return Some(child.wait_with_output().unwrap());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    None
+}
+
+/// Spawn `ae` against `socket` with a 1-second client timeout.
+fn spawn(socket: &Path, args: &[&str]) -> std::process::Child {
+    Command::new(bin())
+        .arg("--socket")
+        .arg(socket)
+        .arg("--db")
+        .arg(socket.with_extension("db"))
+        .args(args)
+        .env("AE_CLIENT_TIMEOUT_SECS", "1")
+        .env("AE_CONSOLIDATE_SECS", "-1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
 #[test]
 fn daemon_starts_serves_a_follower_and_stops() {
     let sock = scratch_socket("lifecycle");
@@ -259,4 +303,101 @@ fn wait_until(budget: Duration, cond: impl Fn() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     cond()
+}
+
+/// A Leader that never answers must not hang its callers: every client wait is
+/// bounded, and the caller falls back to evaluating in-process.
+#[test]
+fn an_unresponsive_daemon_does_not_hang_a_caller() {
+    let sock = scratch_socket("deaf");
+    let _leader = deaf_leader(&sock);
+
+    let out = run_bounded(
+        spawn(&sock, &["-j", "Check the OKR board."]),
+        Duration::from_secs(20),
+    )
+    .expect("caller never returned from an unresponsive daemon");
+    assert!(out.status.success());
+    let body = String::from_utf8_lossy(&out.stdout);
+    let v: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR"),
+        "self-healed analysis missing: {body}"
+    );
+
+    cleanup(&sock);
+}
+
+/// `-d` on a stream routes the lines through the warm daemon instead of opening
+/// a private engine per invocation — the difference, for something called on
+/// every command's output, between one socket round trip and one model load.
+///
+/// Proven by making the dictionary unopenable by anyone but the daemon that
+/// already holds it: with `-d` the stream is still answered, without it the
+/// same call can't even open the engine.
+#[test]
+fn a_stream_with_the_daemon_flag_goes_through_the_daemon() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sock = scratch_socket("dstream");
+    let db = sock.with_extension("db");
+    let (ok, msg) = run(&sock, &["--daemon"], "30");
+    assert!(ok, "daemon failed to start: {msg}");
+
+    let input = sock.with_extension("txt");
+    std::fs::write(&input, "Check the OKR board.\n").unwrap();
+    let chmod = |mode| {
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let stream = |args: &[&str]| {
+        run_bounded(spawn(&sock, args), Duration::from_secs(20)).expect("stream never returned")
+    };
+    let file = input.to_str().unwrap();
+
+    chmod(0o000);
+    let served = stream(&["-d", "-j", "--file", file]);
+    let alone = stream(&["-j", "--file", file]);
+    chmod(0o600);
+
+    assert!(
+        !alone.status.success(),
+        "in-process stream opened a dictionary it has no access to"
+    );
+    assert!(served.status.success());
+    let body = String::from_utf8_lossy(&served.stdout);
+    let v: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.iter()
+            .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR"),
+        "daemon-served analysis missing: {body}"
+    );
+
+    let (stopped, _) = run(&sock, &["--stop"], "30");
+    assert!(stopped);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    let _ = std::fs::remove_file(&input);
+    cleanup(&sock);
+}
+
+/// A live Leader whose socket has gone missing still holds the lock, so a
+/// caller's spawned daemon loses the election and exits at once. The caller has
+/// to notice that and self-heal, not poll out its whole startup window waiting
+/// for a socket that will never appear.
+#[test]
+fn a_daemon_that_cannot_win_the_lock_does_not_stall_its_caller() {
+    let sock = scratch_socket("doomed");
+    let (ok, msg) = run(&sock, &["--daemon"], "5");
+    assert!(ok, "daemon failed to start: {msg}");
+    std::fs::remove_file(&sock).unwrap();
+
+    let out = run_bounded(
+        spawn(&sock, &["-d", "-j", "Check the OKR board."]),
+        Duration::from_secs(3),
+    )
+    .expect("caller waited out the daemon startup window");
+    assert!(out.status.success());
+
+    wait_until(Duration::from_secs(10), || !connectable(&sock));
+    cleanup(&sock);
 }

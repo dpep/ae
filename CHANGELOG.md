@@ -8,6 +8,17 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
+- `-d` now streams piped stdin and `--file` through the daemon instead of
+  opening a private engine per invocation: ~12MB per call rather than ~120MB,
+  because the model is loaded once, by the daemon. Anything calling `ae` on
+  every command's output was paying a model load every time.
+- Every daemon round trip is bounded — 15 seconds, or `AE_CLIENT_TIMEOUT_SECS`.
+  A daemon that stopped answering used to hang its caller indefinitely; callers
+  now give up and evaluate in-process.
+- The daemon loads its engine before binding the socket, so a reachable socket
+  means a daemon that can answer. A caller whose spawned daemon loses the lock
+  election also gives up immediately, instead of waiting out the full 3-second
+  startup window on a socket that will never appear.
 
 ## 0.6.1 — 2026-08-12
 - Underscores no longer split tokens, so `MIN_CONFIDENCE` stays one word rather

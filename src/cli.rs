@@ -372,16 +372,25 @@ fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::
     Ok(payload)
 }
 
-/// Stream input line by line through one warm in-process engine, emitting each
-/// line's findings as it's analyzed. Human/NDJSON flush per line (so `tail -f |
-/// ae -J` is live); pretty JSON can't emit a partial array, so it aggregates and
-/// renders once at the end. The default path for piped stdin and `--file`.
-/// In-process (not via the daemon), since it's one pass over many lines.
+/// Stream input line by line, emitting each line's findings as it's analyzed.
+/// Human/NDJSON flush per line (so `tail -f | ae -J` is live); pretty JSON can't
+/// emit a partial array, so it aggregates and renders once at the end. The
+/// default path for piped stdin and `--file`.
+///
+/// `-d` routes the lines through the warm daemon — one shared engine for every
+/// caller, instead of a private model load per invocation, which is what makes
+/// `ae` cheap to call on every command's output. Without it (or if the daemon
+/// stops answering mid-stream) the engine is opened here and the stream
+/// finishes in-process.
 fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode {
-    let engine = match Engine::open(&cli.db_path(), cli.model.as_deref()) {
-        Ok(e) => e,
-        Err(e) => return fail(fmt, &format!("could not open engine: {e}")),
-    };
+    let mut proxy = cli.daemon && daemon_serves_requested_db(cli);
+    let mut engine = None;
+    if !proxy {
+        match Engine::open(&cli.db_path(), cli.model.as_deref()) {
+            Ok(e) => engine = Some(e),
+            Err(e) => return fail(fmt, &format!("could not open engine: {e}")),
+        }
+    }
 
     // Pretty JSON needs the whole array to be valid, so it buffers; human and
     // NDJSON stream per line.
@@ -399,10 +408,19 @@ fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode 
         if line.trim().is_empty() {
             continue;
         }
-        let payload = if cli.read_only {
-            engine.expand_only(&line)
-        } else {
-            engine.analyze(&line)
+        let payload = match proxy.then(|| ipc::run_follower(&cli.socket, &line, cli.read_only)) {
+            Some(Ok(p)) => Ok(p),
+            outcome => {
+                if let Some(Err(e)) = outcome {
+                    log::debug!("daemon stopped answering ({e}); streaming in-process");
+                    proxy = false;
+                }
+                match stream_engine(cli, &mut engine) {
+                    Ok(engine) if cli.read_only => engine.expand_only(&line),
+                    Ok(engine) => engine.analyze(&line),
+                    Err(e) => return fail(fmt, &format!("could not open engine: {e}")),
+                }
+            }
         };
         let payload = match payload {
             Ok(p) => p,
@@ -437,6 +455,15 @@ fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode 
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The stream's own engine, opened on first use — while the daemon is answering
+/// it is never opened at all, which is the whole point of proxying a stream.
+fn stream_engine<'a>(cli: &Cli, engine: &'a mut Option<Engine>) -> rusqlite::Result<&'a Engine> {
+    if engine.is_none() {
+        *engine = Some(Engine::open(&cli.db_path(), cli.model.as_deref())?);
+    }
+    Ok(engine.as_ref().expect("just opened"))
 }
 
 /// Report daemon status to stdout, honoring the format. Read-only — probes the

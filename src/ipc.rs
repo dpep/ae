@@ -10,6 +10,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +26,15 @@ use crate::types::{AnalysisPayload, StatusPayload};
 /// via `AE_IDLE_SECS` (tests use a short value).
 const DEFAULT_IDLE_SECS: u64 = 300;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
+/// Default ceiling on a client's wait for a Leader, overridable via
+/// `AE_CLIENT_TIMEOUT_SECS`. A Leader that stops answering must not hang its
+/// callers — `ae` runs from hooks and pipelines where a stuck process is
+/// invisible until it has piled up.
+const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 15;
+/// The mirror image: how long the Leader waits on a client mid-request. A
+/// caller that connects and stalls would otherwise pin a serving thread, and an
+/// in-flight request holds the janitor's idle timer open forever.
+const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long graceful shutdown waits for in-flight requests before exiting
 /// anyway, so a hung client can't keep the daemon alive forever.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -63,6 +73,24 @@ fn idle_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+fn client_timeout() -> Duration {
+    let secs = std::env::var("AE_CLIENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_CLIENT_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Connect to a Leader with both directions bounded by [`client_timeout`], so
+/// every client call either completes or fails — never blocks indefinitely.
+fn connect(socket: &Path) -> io::Result<UnixStream> {
+    let stream = UnixStream::connect(socket)?;
+    let timeout = Some(client_timeout());
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    Ok(stream)
+}
+
 // ---- framing -------------------------------------------------------------
 
 fn write_frame(w: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
@@ -92,7 +120,7 @@ fn read_frame(r: &mut impl Read) -> io::Result<Vec<u8>> {
 /// requests expansion without learning. Returns `Err` when no Leader is
 /// reachable, which the caller treats as "fall back in-process".
 pub fn run_follower(socket: &Path, text: &str, read_only: bool) -> io::Result<AnalysisPayload> {
-    let mut stream = UnixStream::connect(socket)?;
+    let mut stream = connect(socket)?;
     let req = serde_json::to_vec(&Request::Analyze {
         text: text.to_string(),
         read_only,
@@ -106,7 +134,7 @@ pub fn run_follower(socket: &Path, text: &str, read_only: bool) -> io::Result<An
 /// Ask a running Leader to shut down. `Ok(true)` if one was reached and told to
 /// stop; `Ok(false)` if none was running.
 pub fn stop(socket: &Path) -> io::Result<bool> {
-    match UnixStream::connect(socket) {
+    match connect(socket) {
         Ok(mut stream) => {
             write_frame(&mut stream, &serde_json::to_vec(&Request::Stop).unwrap())?;
             let _ = read_frame(&mut stream); // best-effort ack
@@ -119,7 +147,7 @@ pub fn stop(socket: &Path) -> io::Result<bool> {
 /// Query a running Leader's status. `Ok(Some(_))` if one answered; `Ok(None)` if
 /// none is running (unreachable socket). Read-only — never starts a daemon.
 pub fn status(socket: &Path) -> io::Result<Option<StatusPayload>> {
-    let Ok(mut stream) = UnixStream::connect(socket) else {
+    let Ok(mut stream) = connect(socket) else {
         return Ok(None);
     };
     write_frame(&mut stream, &serde_json::to_vec(&Request::Status).unwrap())?;
@@ -144,15 +172,25 @@ pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
-    cmd.stdin(std::process::Stdio::null())
+    // Its own process group: the daemon outlives the (often short-lived, often
+    // signalled) caller that happened to start it.
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()?;
 
     // Wait (up to ~3s) for the child to bind the socket.
     for _ in 0..30 {
         if UnixStream::connect(socket).is_ok() {
             return Ok(DaemonOutcome::Started);
+        }
+        // A child that lost the lock election exits immediately. Reap it here —
+        // otherwise it lingers as a zombie for as long as we live — and stop
+        // waiting for a socket it was never going to bind.
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return Err(io::Error::other("daemon exited during startup"));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -180,13 +218,18 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     }
     // We hold the lock for the process lifetime — keep `lock_file` alive.
 
+    // Load the engine *before* binding: a connectable socket has to mean "ready
+    // to answer". Binding first leaves every caller blocked on a Leader that
+    // can't reply yet, and a cold model load is not instant. While we load,
+    // there is no socket, so callers self-heal in-process.
+    let engine = Arc::new(Mutex::new(Engine::open(db, model).map_err(to_io)?));
+
     // We are the sole Leader, so any socket file is stale.
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket)?;
     log::info!("leader listening on {}", socket.display());
 
     let started = Instant::now();
-    let engine = Arc::new(Mutex::new(Engine::open(db, model).map_err(to_io)?));
     let active = Arc::new(AtomicUsize::new(0));
     let last_activity = Arc::new(Mutex::new(Instant::now()));
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -278,6 +321,8 @@ fn handle_connection(
     shutdown: &AtomicBool,
     started: Instant,
 ) -> io::Result<()> {
+    let _ = stream.set_read_timeout(Some(SERVER_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SERVER_TIMEOUT));
     let req: Request = serde_json::from_slice(&read_frame(&mut stream)?)?;
     match req {
         Request::Analyze { text, read_only } => {

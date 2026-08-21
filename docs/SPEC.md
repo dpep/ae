@@ -94,9 +94,10 @@ the process thread.
   `--status -q` is a silent health check.
 - Input source picks the mode: a positional `text` argument is analyzed as one
   blob; piped stdin and `--file` are streamed line by line (flushed per line for
-  human/NDJSON; pretty JSON buffers an array). Either way the structured output
-  is the same flat list of findings (`{kind, acronym, …}`) — single and stream,
-  `-j` and `-J`, all share one shape. A bare TTY invocation prints help.
+  human/NDJSON; pretty JSON buffers an array). `-d` sends either through the
+  daemon, so a repeated caller loads the model once, not once per call. Either
+  way the structured output is the same flat list of findings (`{kind, acronym,
+  …}`) — single and stream, `-j` and `-J`, all share one shape. A bare TTY invocation prints help.
 - `stdout` stays pristine for data; logs go to `stderr` via `env_logger`.
 
 ### Milestone 2: IPC Socket Multiplexing & Self-Healing Guardrails
@@ -106,6 +107,12 @@ resource collisions across duplicate client windows.
 
 - `flock` on `/tmp/ae.lock` decides Leader vs Follower.
 - Leader spawns a UDS listener; Followers forward raw text and pipe back JSON.
+  The engine is loaded before the socket is bound: a reachable socket means a
+  Leader that can answer.
+- Neither side ever waits forever. A Follower bounds its round trip
+  (`AE_CLIENT_TIMEOUT_SECS`, default 15s) and self-heals in-process; the Leader
+  bounds its side too, so a stalled client can't pin a thread or hold the
+  janitor's idle timer open.
 - Lazy janitor: when the connection counter hits 0 and stdio disconnects, a
   15-second timer (re-armed by new connections) removes the socket and exits.
 
