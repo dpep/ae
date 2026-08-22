@@ -462,7 +462,19 @@ fn the_daemon_logs_beside_its_socket() {
         std::fs::read_to_string(&log)
     );
 
+    // A caller checking whether we're up connects and drops. That is routine,
+    // and a log carrying a warning per call is a log nobody reads.
+    for _ in 0..3 {
+        assert!(connectable(&sock));
+    }
     assert!(run(&sock, &["--stop"], "30").0);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    let body = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !body.contains("connection error"),
+        "routine probes logged as errors: {body}"
+    );
+
     wait_until(Duration::from_secs(2), || !connectable(&sock));
     cleanup(&sock);
 }

@@ -13,6 +13,9 @@ releases are grouped at the end.
   detached process that died silently could not be debugged at any verbosity,
   from anywhere. It logs at info by default, and `RUST_LOG` and `RUST_BACKTRACE`
   reach it, since the daemon inherits the environment that spawned it.
+- A caller connecting to check whether the daemon is up no longer logs as a
+  failed connection. It happens once per call, so the log the previous entry
+  added would have been mostly warnings about nothing.
 - "daemon exited during startup" now distinguishes its two causes. Something
   holding the lock without serving — a stale daemon, the one case a retry never
   resolves — is named as such, with the file and the way out; anything else

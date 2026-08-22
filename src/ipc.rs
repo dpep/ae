@@ -392,7 +392,15 @@ fn handle_connection(
 ) -> io::Result<()> {
     let _ = stream.set_read_timeout(Some(SERVER_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SERVER_TIMEOUT));
-    let req: Request = serde_json::from_slice(&read_frame(&mut stream)?)?;
+    let frame = match read_frame(&mut stream) {
+        Ok(frame) => frame,
+        // Connect-and-drop is how a caller checks whether we're up, so it is a
+        // disconnect, not an error. Logging it as one puts a warning in the log
+        // for every call — which is how a log stops being read.
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let req: Request = serde_json::from_slice(&frame)?;
     match req {
         Request::Analyze { text, read_only } => {
             let engine = engine.lock().unwrap();
