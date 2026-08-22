@@ -26,14 +26,17 @@ use crate::types::{AnalysisPayload, StatusPayload};
 /// via `AE_IDLE_SECS` (tests use a short value).
 const DEFAULT_IDLE_SECS: u64 = 300;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
-/// Two client-side waits, because they answer different questions. Getting a
-/// request *into* a Leader is a local write: two seconds of it means the Leader
-/// isn't reading, not that it's busy. Waiting for the reply is the analysis
-/// itself, so it gets longer (`AE_CLIENT_TIMEOUT_SECS`) — though a warm daemon
-/// answers in milliseconds, making this a backstop rather than a budget.
-/// Either way a Leader that stops answering must never hang its callers: `ae`
-/// runs from hooks and pipelines, where a stuck process is invisible until it
-/// has piled up.
+/// Two client-side waits. The write bound catches a Leader whose socket buffer
+/// has filled because nobody is draining it; note that a request smaller than
+/// the buffer lands instantly whether or not anyone ever reads it, so for
+/// typical input the *read* bound below is what actually detects a wedged
+/// Leader. Telling "unreachable" from "thinking" faster than that would take a
+/// ping with its own deadline, which is a round trip on every call to save
+/// three seconds on a path that shouldn't happen.
+///
+/// What matters either way: a Leader that stops answering must never hang its
+/// callers. `ae` runs from hooks and pipelines, where a stuck process is
+/// invisible until it has piled up.
 const REACH_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_REPLY_TIMEOUT_SECS: u64 = 5;
 /// The mirror image: how long the Leader waits on a client mid-request. A
