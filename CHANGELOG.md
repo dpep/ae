@@ -16,6 +16,17 @@ releases are grouped at the end.
   seconds for the answer (`AE_CLIENT_TIMEOUT_SECS`). A daemon that stopped
   answering used to hang its caller indefinitely; callers now give up and
   evaluate in-process.
+- A daemon whose socket file is deleted out from under it now exits. Nothing can
+  wake an accept loop with no socket, so it sat there forever holding the lock —
+  unreachable by `ae --stop`, and forcing every later call to evaluate
+  in-process. `AE_IDLE_SECS` and `AE_CLIENT_TIMEOUT_SECS` are floored at 1: zero
+  meant a daemon that died on its first tick, and a socket timeout std rejects.
+- The one-off model download is bounded (`AE_FETCH_TIMEOUT_SECS`, 60s) and the
+  daemon's watchdog now covers the model load itself. `hf-hub` builds its HTTP
+  client with no timeouts, so a stalled connection — captive portal, dropped
+  VPN — hung the load with the lock held and no watchdog yet running: the one
+  state no client-side timeout could rescue. A cached model never touches the
+  network, so this only bounds the first fetch.
 - The idle timeout can no longer be held open indefinitely. It only ran while
   nothing was in flight, so one client that connected and never sent its request
   kept the daemon alive for good — and the Leader would wait on that client

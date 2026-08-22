@@ -26,6 +26,8 @@ const MAX_SEQ: usize = 256;
 /// Default model on the HuggingFace Hub (ONNX int8-quantized export of
 /// all-MiniLM-L6-v2). Override with `--model <dir | .onnx | org/name>`.
 const DEFAULT_HF_REPO: &str = "Xenova/all-MiniLM-L6-v2";
+/// Default ceiling on the one-off model download.
+const DEFAULT_FETCH_TIMEOUT_SECS: u64 = 60;
 const HF_MODEL_FILE: &str = "onnx/model_quantized.onnx";
 const HF_TOKENIZER_FILE: &str = "tokenizer.json";
 
@@ -176,9 +178,40 @@ fn resolve(spec: &str) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// Fetch `<repo>`'s ONNX model + tokenizer from the HuggingFace Hub into the
-/// shared cache (`~/.cache/huggingface/hub`, honoring `HF_HOME`), returning
-/// their local paths. `None` on any error (offline + uncached → hash fallback).
+/// shared cache, bounded by [`fetch_timeout`].
+///
+/// `hf-hub` builds its HTTP agent with no timeouts of any kind, so a connection
+/// that stalls instead of failing — captive portal, dropped VPN — hangs the
+/// caller indefinitely. In the daemon that means hanging while holding the lock,
+/// which strands every future caller too. A cached model never reaches the
+/// network at all (`ApiRepo::get` checks the cache first), so this only bounds
+/// the genuinely-first fetch, and the download keeps running: whatever it
+/// finishes lands in the shared cache for the next call to pick up.
 fn fetch_from_hub(repo: &str) -> Option<(PathBuf, PathBuf)> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let repo = repo.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(fetch_blocking(&repo));
+    });
+    match rx.recv_timeout(fetch_timeout()) {
+        Ok(paths) => paths,
+        Err(_) => {
+            log::warn!("HuggingFace fetch timed out; using the fallback embedder");
+            None
+        }
+    }
+}
+
+/// Seconds to allow the Hub, via `AE_FETCH_TIMEOUT_SECS`.
+fn fetch_timeout() -> std::time::Duration {
+    let secs = std::env::var("AE_FETCH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_FETCH_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs.max(1))
+}
+
+fn fetch_blocking(repo: &str) -> Option<(PathBuf, PathBuf)> {
     use hf_hub::api::sync::Api;
     let api = Api::new()
         .map_err(|e| log::debug!("HuggingFace Hub init failed: {e}"))

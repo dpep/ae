@@ -67,6 +67,15 @@ fn connectable(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
+/// Whether `pid` is still a live process.
+fn alive(pid: u64) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .map(|out| !out.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// A stand-in Leader that binds the socket, accepts, and never answers — the
 /// shape of a daemon that is still warming up or has wedged. Connections are
 /// held open (closing them would hand the client an EOF, not a stall).
@@ -380,15 +389,26 @@ fn a_stream_with_the_daemon_flag_goes_through_the_daemon() {
     cleanup(&sock);
 }
 
-/// A live Leader whose socket has gone missing still holds the lock, so a
-/// caller's spawned daemon loses the election and exits at once. The caller has
-/// to notice that and self-heal, not poll out its whole startup window waiting
-/// for a socket that will never appear.
+/// A Leader whose socket is unlinked out from under it can strand two different
+/// parties, and must strand neither.
+///
+/// The caller: it still holds the lock, so a spawned daemon loses the election
+/// and exits at once — which the caller has to notice, rather than polling out
+/// its whole startup window for a socket that will never appear.
+///
+/// Itself: nothing can wake an accept loop whose socket is gone, so it would sit
+/// there forever holding the lock and the engine, unreachable by `--stop` and
+/// invisible to everything but `ps`.
 #[test]
-fn a_daemon_that_cannot_win_the_lock_does_not_stall_its_caller() {
+fn a_leader_with_no_socket_strands_nobody() {
     let sock = scratch_socket("doomed");
     let (ok, msg) = run(&sock, &["--daemon"], "5");
     assert!(ok, "daemon failed to start: {msg}");
+    let (up, body) = run(&sock, &["--status", "-j"], "5");
+    assert!(up, "{body}");
+    let pid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["pid"]
+        .as_u64()
+        .expect("status reports a pid");
     std::fs::remove_file(&sock).unwrap();
 
     let out = run_bounded(
@@ -398,7 +418,10 @@ fn a_daemon_that_cannot_win_the_lock_does_not_stall_its_caller() {
     .expect("caller waited out the daemon startup window");
     assert!(out.status.success());
 
-    wait_until(Duration::from_secs(10), || !connectable(&sock));
+    assert!(
+        wait_until(Duration::from_secs(20), || !alive(pid)),
+        "leader with nothing left to accept on never exited"
+    );
     cleanup(&sock);
 }
 

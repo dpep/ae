@@ -75,7 +75,10 @@ fn idle_timeout() -> Duration {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_IDLE_SECS);
-    Duration::from_secs(secs)
+    // Floored at 1: zero would reap the daemon on the janitor's first tick, and
+    // a zero socket timeout is an error in std — either way every call would
+    // silently fall back in-process.
+    Duration::from_secs(secs.max(1))
 }
 
 fn reply_timeout() -> Duration {
@@ -83,7 +86,7 @@ fn reply_timeout() -> Duration {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_REPLY_TIMEOUT_SECS);
-    Duration::from_secs(secs)
+    Duration::from_secs(secs.max(1))
 }
 
 /// Connect to a Leader with both directions bounded, so every client call either
@@ -224,6 +227,19 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     }
     // We hold the lock for the process lifetime — keep `lock_file` alive.
 
+    let last_activity = Arc::new(Mutex::new(Instant::now()));
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Start the janitor first, so it covers the engine load too. A load that
+    // never returns would otherwise hold the lock forever with no watchdog
+    // running — the one state no client-side timeout can rescue.
+    spawn_janitor(
+        socket.to_path_buf(),
+        last_activity.clone(),
+        shutdown.clone(),
+        exe,
+    );
+
     // Load the engine *before* binding: a connectable socket has to mean "ready
     // to answer". Binding first leaves every caller blocked on a Leader that
     // can't reply yet, and a cold model load is not instant. While we load,
@@ -237,15 +253,6 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
 
     let started = Instant::now();
     let active = Arc::new(AtomicUsize::new(0));
-    let last_activity = Arc::new(Mutex::new(Instant::now()));
-    let shutdown = Arc::new(AtomicBool::new(false));
-
-    spawn_janitor(
-        socket.to_path_buf(),
-        last_activity.clone(),
-        shutdown.clone(),
-        exe,
-    );
 
     for stream in listener.incoming() {
         // A shutdown trigger wakes this blocking accept with a throwaway
@@ -300,10 +307,22 @@ fn drain(active: &AtomicUsize) {
 }
 
 /// Begin graceful shutdown: raise the flag, then wake the (blocking) accept loop
-/// with a throwaway self-connection so it observes the flag promptly.
-fn trigger_shutdown(shutdown: &AtomicBool, socket: &Path) {
+/// with a throwaway self-connection so it observes the flag promptly. Reports
+/// whether the loop could be woken.
+fn trigger_shutdown(shutdown: &AtomicBool, socket: &Path) -> bool {
     shutdown.store(true, Ordering::SeqCst);
-    let _ = UnixStream::connect(socket);
+    UnixStream::connect(socket).is_ok()
+}
+
+/// Shut down, one way or the other. Nothing can wake an accept loop whose
+/// socket has been unlinked (or that hasn't bound one yet), and a Leader parked
+/// there is immortal *and* unreachable — still holding the lock, so every
+/// caller after it evaluates in-process forever. Exit instead.
+fn shutdown_now(shutdown: &AtomicBool, socket: &Path) {
+    if !trigger_shutdown(shutdown, socket) {
+        log::warn!("cannot reach our own socket; exiting without draining");
+        std::process::exit(0);
+    }
 }
 
 /// A best-effort identity for the running binary. Replacing the executable on
@@ -367,7 +386,7 @@ fn handle_connection(
             // background instead of hard-exiting mid-request.
             write_frame(&mut stream, b"\x01")?;
             log::info!("stop requested; draining and shutting down");
-            trigger_shutdown(shutdown, socket);
+            shutdown_now(shutdown, socket);
         }
     }
     Ok(())
@@ -397,13 +416,13 @@ fn spawn_janitor(
             // effect. Only acts when we have a baseline to compare against.
             if exe.is_some() && exe_fingerprint() != exe {
                 log::info!("binary changed on disk; shutting down to refresh");
-                trigger_shutdown(&shutdown, &socket);
+                shutdown_now(&shutdown, &socket);
                 return;
             }
             let elapsed = last.lock().unwrap().elapsed();
             if elapsed >= timeout {
                 log::info!("idle for {:?}; shutting down", elapsed);
-                trigger_shutdown(&shutdown, &socket);
+                shutdown_now(&shutdown, &socket);
                 return;
             }
         }
