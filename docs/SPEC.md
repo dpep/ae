@@ -116,9 +116,11 @@ resource collisions across duplicate client windows.
   in-process; the Leader bounds its side too, so a stalled client can't pin a
   serving thread.
 - The Leader's stderr is a log beside the socket (`<socket>.log`), appended
-  across daemons and capped at 1MiB. It detaches, so nothing else can account
-  for why it died — and a crash loop is what the log is most needed for, so it
-  must survive a restart.
+  across daemons and capped at `AE_LOG_MAX_BYTES` (default 1MiB, newest half
+  kept). It detaches, so nothing else can account for why it died — and a crash
+  loop is what the log is most needed for, so it must survive a restart. The cap
+  is enforced by the janitor as well as at startup: a debug-level run logs twice
+  a second, and would otherwise never re-check.
 - Lazy janitor: `AE_IDLE_SECS` (default 300s) without a finished request removes
   the socket and exits. In-flight requests don't gate it — that would let one
   stuck client keep the daemon alive forever — they get a bounded drain.

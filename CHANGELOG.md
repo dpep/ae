@@ -13,7 +13,8 @@ releases are grouped at the end.
   says whether the daemon is being used or every call is quietly falling back
   to a private engine at ten times the memory — which is invisible otherwise.
 - A daemon that fails to start now says why. Its stderr goes to a log beside the
-  socket (`/tmp/ae.log`), appended across daemons and capped at 1MiB, instead of
+  socket (`/tmp/ae.log`), appended across daemons and capped at 1MiB
+  (`AE_LOG_MAX_BYTES`, enforced while it runs, not only at startup), instead of
   `/dev/null` — a
   detached process that died silently could not be debugged at any verbosity,
   from anywhere. It logs at info by default, and `RUST_LOG` and `RUST_BACKTRACE`

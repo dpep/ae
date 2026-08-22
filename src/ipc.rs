@@ -81,10 +81,11 @@ pub fn log_path(socket: &Path) -> PathBuf {
     socket.with_extension("log")
 }
 
-/// Cap on the daemon log, enforced when one starts. A daemon's whole life is a
-/// handful of lines, so this only bites on a loop — which is exactly when the
-/// oldest lines stop being the interesting ones.
-const LOG_MAX_BYTES: u64 = 1 << 20;
+/// Cap on the daemon log, overridable via `AE_LOG_MAX_BYTES`. A daemon's whole
+/// life is a handful of lines, so a megabyte is thousands of them — this only
+/// bites during a crash loop or a debug-level run, which is exactly when the
+/// oldest lines have stopped being the interesting ones.
+const DEFAULT_LOG_MAX_BYTES: u64 = 1 << 20;
 
 /// Analyses this Leader has served. Process-global because a process is exactly
 /// one Leader, and it answers the question the fallback makes invisible: a
@@ -92,21 +93,38 @@ const LOG_MAX_BYTES: u64 = 1 << 20;
 /// shows up nowhere. Compare it against how often the caller says it ran.
 static SERVED: AtomicUsize = AtomicUsize::new(0);
 
-/// Open the daemon log for append, keeping the newest half if it has outgrown
-/// [`LOG_MAX_BYTES`].
-fn open_log(socket: &Path) -> io::Result<File> {
-    let path = log_path(socket);
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES)
-        && let Ok(body) = std::fs::read(&path)
+fn log_max_bytes() -> u64 {
+    std::env::var("AE_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_LOG_MAX_BYTES)
+        // A cap below a single entry would trim on every write, and zero would
+        // mean "keep nothing" — neither is a thing anyone wants.
+        .max(4096)
+}
+
+/// Drop the oldest half of the log once it outgrows [`log_max_bytes`]. Safe to
+/// call while the daemon is writing: its stderr is opened `O_APPEND`, so the
+/// next line goes to the end of whatever is there now.
+fn trim_log(path: &Path) {
+    let cap = log_max_bytes();
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > cap)
+        && let Ok(body) = std::fs::read(path)
     {
-        let keep = body.len() - (LOG_MAX_BYTES / 2) as usize;
+        let keep = body.len() - (cap / 2) as usize;
         // Resume at a line boundary so the first entry isn't a fragment.
         let cut = body[keep..]
             .iter()
             .position(|&b| b == b'\n')
             .map_or(keep, |i| keep + i + 1);
-        let _ = std::fs::write(&path, &body[cut..]);
+        let _ = std::fs::write(path, &body[cut..]);
     }
+}
+
+/// Open the daemon log for append, trimmed first if it has outgrown its cap.
+fn open_log(socket: &Path) -> io::Result<File> {
+    let path = log_path(socket);
+    trim_log(&path);
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -505,6 +523,9 @@ fn spawn_janitor(
             if shutdown.load(Ordering::SeqCst) {
                 return; // shutdown already under way (e.g. via --stop)
             }
+            // Trimming only at startup would leave a long-lived daemon
+            // unbounded — a debug-level run logs twice a second, from here.
+            trim_log(&log_path(&socket));
             // Stale binary: step down so an upgrade/reinstall/rebuild takes
             // effect. Only acts when we have a baseline to compare against.
             if exe.is_some() && exe_fingerprint() != exe {

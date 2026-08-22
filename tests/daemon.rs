@@ -557,3 +557,70 @@ fn a_daemon_that_cannot_take_the_lock_says_so() {
     let _ = Command::new("kill").arg(pid.to_string()).status();
     cleanup(&sock);
 }
+
+/// The log outlives daemons, so something has to bound it — and bounding it
+/// only at startup would leave a long-lived one to grow without limit. It keeps
+/// the newest half, because during a crash loop the oldest lines are the least
+/// interesting ones.
+#[test]
+fn the_log_is_capped_while_the_daemon_runs() {
+    let sock = scratch_socket("logcap");
+    let log = sock.with_extension("log");
+    let cap = 4096; // the floor, so the test writes kilobytes rather than megabytes
+
+    // A log that is already too big when a daemon starts is trimmed on the way in.
+    let old = "x".repeat(80);
+    std::fs::write(&log, format!("{}\nOLDEST-LINE\n", old.repeat(200))).unwrap();
+    let before = std::fs::metadata(&log).unwrap().len();
+    let out = Command::new(bin())
+        .arg("--socket")
+        .arg(&sock)
+        .arg("--db")
+        .arg(sock.with_extension("db"))
+        .arg("--daemon")
+        .env("AE_IDLE_SECS", "30")
+        .env("AE_LOG_MAX_BYTES", cap.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "daemon failed to start");
+    let trimmed = std::fs::metadata(&log).unwrap().len();
+    assert!(
+        trimmed < before && trimmed <= cap,
+        "log not trimmed at startup: {before} -> {trimmed}"
+    );
+    let body = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        body.contains("OLDEST-LINE"),
+        "trimmed the newest half instead"
+    );
+    assert!(
+        !body.starts_with('x'),
+        "resumed mid-line rather than at a line boundary"
+    );
+
+    // And a log that outgrows the cap *while* it runs is trimmed too, without
+    // disturbing the daemon writing to it.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .map(|mut f| {
+            use std::io::Write;
+            f.write_all(format!("{}\n", old.repeat(200)).as_bytes())
+        })
+        .unwrap()
+        .unwrap();
+    assert!(
+        wait_until(Duration::from_secs(5), || std::fs::metadata(&log)
+            .is_ok_and(|m| m.len() <= cap)),
+        "running daemon never trimmed its own log: {} bytes",
+        std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0)
+    );
+    assert!(connectable(&sock), "daemon died while trimming");
+
+    assert!(run(&sock, &["--stop"], "30").0);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    cleanup(&sock);
+}
