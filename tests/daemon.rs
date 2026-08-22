@@ -401,3 +401,23 @@ fn a_daemon_that_cannot_win_the_lock_does_not_stall_its_caller() {
     wait_until(Duration::from_secs(10), || !connectable(&sock));
     cleanup(&sock);
 }
+
+/// A client that connects and then stalls holds a serving thread for as long as
+/// the Leader will wait on it. The idle clock has to keep running anyway —
+/// gating it on "nothing in flight" is what makes a daemon immortal.
+#[test]
+fn a_stalled_client_cannot_keep_the_daemon_alive() {
+    let sock = scratch_socket("stalled");
+    let (ok, msg) = run(&sock, &["--daemon"], "2");
+    assert!(ok, "daemon failed to start: {msg}");
+
+    let _stalled = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    // Watch the socket file, not a connection: connecting would re-arm the very
+    // idle clock under test.
+    assert!(
+        wait_until(Duration::from_secs(10), || !sock.exists()),
+        "daemon stayed up while a stalled client held a serving thread"
+    );
+
+    cleanup(&sock);
+}

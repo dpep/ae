@@ -26,11 +26,16 @@ use crate::types::{AnalysisPayload, StatusPayload};
 /// via `AE_IDLE_SECS` (tests use a short value).
 const DEFAULT_IDLE_SECS: u64 = 300;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
-/// Default ceiling on a client's wait for a Leader, overridable via
-/// `AE_CLIENT_TIMEOUT_SECS`. A Leader that stops answering must not hang its
-/// callers — `ae` runs from hooks and pipelines where a stuck process is
-/// invisible until it has piled up.
-const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 15;
+/// Two client-side waits, because they answer different questions. Getting a
+/// request *into* a Leader is a local write: two seconds of it means the Leader
+/// isn't reading, not that it's busy. Waiting for the reply is the analysis
+/// itself, so it gets longer (`AE_CLIENT_TIMEOUT_SECS`) — though a warm daemon
+/// answers in milliseconds, making this a backstop rather than a budget.
+/// Either way a Leader that stops answering must never hang its callers: `ae`
+/// runs from hooks and pipelines, where a stuck process is invisible until it
+/// has piled up.
+const REACH_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_REPLY_TIMEOUT_SECS: u64 = 5;
 /// The mirror image: how long the Leader waits on a client mid-request. A
 /// caller that connects and stalls would otherwise pin a serving thread, and an
 /// in-flight request holds the janitor's idle timer open forever.
@@ -73,21 +78,22 @@ fn idle_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-fn client_timeout() -> Duration {
+fn reply_timeout() -> Duration {
     let secs = std::env::var("AE_CLIENT_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_CLIENT_TIMEOUT_SECS);
+        .unwrap_or(DEFAULT_REPLY_TIMEOUT_SECS);
     Duration::from_secs(secs)
 }
 
-/// Connect to a Leader with both directions bounded by [`client_timeout`], so
-/// every client call either completes or fails — never blocks indefinitely.
+/// Connect to a Leader with both directions bounded, so every client call either
+/// completes or fails — never blocks indefinitely. The connect itself needs no
+/// bound: with nothing listening it fails at once, and a Leader binds only once
+/// it can answer.
 fn connect(socket: &Path) -> io::Result<UnixStream> {
     let stream = UnixStream::connect(socket)?;
-    let timeout = Some(client_timeout());
-    stream.set_read_timeout(timeout)?;
-    stream.set_write_timeout(timeout)?;
+    stream.set_write_timeout(Some(REACH_TIMEOUT))?;
+    stream.set_read_timeout(Some(reply_timeout()))?;
     Ok(stream)
 }
 
@@ -236,7 +242,6 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
 
     spawn_janitor(
         socket.to_path_buf(),
-        active.clone(),
         last_activity.clone(),
         shutdown.clone(),
         exe,
@@ -371,10 +376,12 @@ fn handle_connection(
 /// Watchdog: trigger a graceful shutdown when the daemon has been idle past
 /// [`idle_timeout`], or when its own binary has been replaced on disk (so the
 /// next call spawns a Leader running the new code). Idle is re-armed by the
-/// activity timestamp every connection updates.
+/// activity timestamp every *finished* connection updates — deliberately not by
+/// whether a request is in flight, or one stalled client holding a serving
+/// thread would make the daemon immortal. Anything genuinely still running gets
+/// [`DRAIN_TIMEOUT`] to finish.
 fn spawn_janitor(
     socket: PathBuf,
-    active: Arc<AtomicUsize>,
     last: Arc<Mutex<Instant>>,
     shutdown: Arc<AtomicBool>,
     exe: Option<(u64, u64, std::time::SystemTime)>,
@@ -393,9 +400,8 @@ fn spawn_janitor(
                 trigger_shutdown(&shutdown, &socket);
                 return;
             }
-            let idle = active.load(Ordering::SeqCst) == 0;
             let elapsed = last.lock().unwrap().elapsed();
-            if idle && elapsed >= timeout {
+            if elapsed >= timeout {
                 log::info!("idle for {:?}; shutting down", elapsed);
                 trigger_shutdown(&shutdown, &socket);
                 return;

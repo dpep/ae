@@ -109,12 +109,13 @@ resource collisions across duplicate client windows.
 - Leader spawns a UDS listener; Followers forward raw text and pipe back JSON.
   The engine is loaded before the socket is bound: a reachable socket means a
   Leader that can answer.
-- Neither side ever waits forever. A Follower bounds its round trip
-  (`AE_CLIENT_TIMEOUT_SECS`, default 15s) and self-heals in-process; the Leader
-  bounds its side too, so a stalled client can't pin a thread or hold the
-  janitor's idle timer open.
-- Lazy janitor: when the connection counter hits 0 and stdio disconnects, a
-  15-second timer (re-armed by new connections) removes the socket and exits.
+- Neither side ever waits forever. A Follower allows 2s to get its request in
+  and `AE_CLIENT_TIMEOUT_SECS` (default 5s) for the answer, then self-heals
+  in-process; the Leader bounds its side too, so a stalled client can't pin a
+  serving thread.
+- Lazy janitor: `AE_IDLE_SECS` (default 300s) without a finished request removes
+  the socket and exits. In-flight requests don't gate it — that would let one
+  stuck client keep the daemon alive forever — they get a bounded drain.
 
 ### Milestone 3: Embedded Storage Engine & 64-Dimensional MRL Compression
 

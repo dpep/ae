@@ -12,9 +12,14 @@ releases are grouped at the end.
   opening a private engine per invocation: ~12MB per call rather than ~120MB,
   because the model is loaded once, by the daemon. Anything calling `ae` on
   every command's output was paying a model load every time.
-- Every daemon round trip is bounded — 15 seconds, or `AE_CLIENT_TIMEOUT_SECS`.
-  A daemon that stopped answering used to hang its caller indefinitely; callers
-  now give up and evaluate in-process.
+- Every daemon round trip is bounded: 2 seconds to get the request in, then 5
+  seconds for the answer (`AE_CLIENT_TIMEOUT_SECS`). A daemon that stopped
+  answering used to hang its caller indefinitely; callers now give up and
+  evaluate in-process.
+- The idle timeout can no longer be held open indefinitely. It only ran while
+  nothing was in flight, so one client that connected and never sent its request
+  kept the daemon alive for good — and the Leader would wait on that client
+  forever. Both sides are now bounded, and idle is measured by elapsed time.
 - The daemon loads its engine before binding the socket, so a reachable socket
   means a daemon that can answer. A caller whose spawned daemon loses the lock
   election also gives up immediately, instead of waiting out the full 3-second
