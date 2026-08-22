@@ -8,11 +8,17 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
+- `ae --status` reports `served`: how many analyses this daemon has answered.
+  Checked against how often the caller thinks it ran, it is the one signal that
+  says whether the daemon is being used or every call is quietly falling back
+  to a private engine at ten times the memory — which is invisible otherwise.
 - A daemon that fails to start now says why. Its stderr goes to a log beside the
-  socket (`/tmp/ae.log`), truncated at each start, instead of `/dev/null` — a
+  socket (`/tmp/ae.log`), appended across daemons and capped at 1MiB, instead of
+  `/dev/null` — a
   detached process that died silently could not be debugged at any verbosity,
   from anywhere. It logs at info by default, and `RUST_LOG` and `RUST_BACKTRACE`
-  reach it, since the daemon inherits the environment that spawned it.
+  reach it, since the daemon inherits the environment that spawned it. Each
+  daemon names its version and pid as it starts, so one file covers many lives.
 - A caller connecting to check whether the daemon is up no longer logs as a
   failed connection. It happens once per call, so the log the previous entry
   added would have been mostly warnings about nothing.

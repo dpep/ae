@@ -74,10 +74,43 @@ pub fn lock_path(socket: &Path) -> PathBuf {
 }
 
 /// Where the daemon's stderr goes. It detaches, so this file is the only place
-/// its logs — and the reason it died — can be read. Truncated at each start, so
-/// it describes the daemon that is running now.
+/// its logs — and the reason it died — can be read. Appended across daemons: a
+/// crash loop is the thing you most need the log for, and truncating per start
+/// would erase it on the way in.
 pub fn log_path(socket: &Path) -> PathBuf {
     socket.with_extension("log")
+}
+
+/// Cap on the daemon log, enforced when one starts. A daemon's whole life is a
+/// handful of lines, so this only bites on a loop — which is exactly when the
+/// oldest lines stop being the interesting ones.
+const LOG_MAX_BYTES: u64 = 1 << 20;
+
+/// Analyses this Leader has served. Process-global because a process is exactly
+/// one Leader, and it answers the question the fallback makes invisible: a
+/// caller that gives up and evaluates in-process costs ten times the memory and
+/// shows up nowhere. Compare it against how often the caller says it ran.
+static SERVED: AtomicUsize = AtomicUsize::new(0);
+
+/// Open the daemon log for append, keeping the newest half if it has outgrown
+/// [`LOG_MAX_BYTES`].
+fn open_log(socket: &Path) -> io::Result<File> {
+    let path = log_path(socket);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES)
+        && let Ok(body) = std::fs::read(&path)
+    {
+        let keep = body.len() - (LOG_MAX_BYTES / 2) as usize;
+        // Resume at a line boundary so the first entry isn't a fragment.
+        let cut = body[keep..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(keep, |i| keep + i + 1);
+        let _ = std::fs::write(&path, &body[cut..]);
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
 }
 
 fn idle_timeout() -> Duration {
@@ -193,7 +226,7 @@ pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result
     }
     // stderr goes to a file, not /dev/null: a detached process that fails
     // silently can't be debugged at any verbosity, from anywhere.
-    let log = File::create(log_path(socket))
+    let log = open_log(socket)
         .map(std::process::Stdio::from)
         .unwrap_or_else(|_| std::process::Stdio::null());
     // Its own process group: the daemon outlives the (often short-lived, often
@@ -294,7 +327,12 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     // We are the sole Leader, so any socket file is stale.
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket)?;
-    log::info!("leader listening on {}", socket.display());
+    log::info!(
+        "leader {} (pid {}) listening on {}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id(),
+        socket.display()
+    );
 
     let started = Instant::now();
     let active = Arc::new(AtomicUsize::new(0));
@@ -409,6 +447,7 @@ fn handle_connection(
             } else {
                 engine.analyze(&text)
             };
+            SERVED.fetch_add(1, Ordering::Relaxed);
             let payload = result.unwrap_or_else(|e| {
                 log::warn!("analysis failed: {e}");
                 AnalysisPayload::empty(text)
@@ -429,6 +468,7 @@ fn handle_connection(
                 pid: std::process::id(),
                 uptime_secs: started.elapsed().as_secs(),
                 embedder: engine.lock().unwrap().embedder_kind().to_string(),
+                served: SERVED.load(Ordering::Relaxed) as u64,
                 idle_timeout_secs: idle_timeout().as_secs(),
                 db: served_db.display().to_string(),
             };

@@ -94,6 +94,11 @@ pub struct StatusPayload {
     pub uptime_secs: u64,
     /// `"onnx"` (real model loaded) or `"hash"` (degraded fallback).
     pub embedder: String,
+    /// Analyses served since this daemon started. Against the caller's own
+    /// count, it says whether the daemon is being used at all — a client that
+    /// falls back in-process is ten times the memory and otherwise invisible.
+    #[serde(default)]
+    pub served: u64,
     pub idle_timeout_secs: u64,
     /// The dictionary this daemon holds open. A daemon serves one database for
     /// its whole life, so a client asking about a different one has to know not

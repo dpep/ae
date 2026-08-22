@@ -224,6 +224,7 @@ pub fn render_status(
                 )?;
                 writeln!(out, "  version    {}", s.version)?;
                 writeln!(out, "  embedder   {}", s.embedder)?;
+                writeln!(out, "  served     {}", s.served)?;
                 writeln!(out, "  idle       {}s", s.idle_timeout_secs)?;
                 writeln!(out, "  socket     {}", socket.display())?;
                 writeln!(out, "  db         {}", db.display())?;
@@ -252,6 +253,7 @@ fn status_json(report: Option<&StatusPayload>, socket: &Path, db: &Path) -> serd
             "pid": s.pid,
             "uptime_secs": s.uptime_secs,
             "embedder": s.embedder,
+            "served": s.served,
             "idle_timeout_secs": s.idle_timeout_secs,
             "socket": socket.display().to_string(),
             "db": db.display().to_string(),
@@ -459,6 +461,7 @@ mod tests {
             pid: 4242,
             uptime_secs: 75,
             embedder: "onnx".into(),
+            served: 17,
             idle_timeout_secs: 300,
             db: "/tmp/ae-test.db".into(),
         }

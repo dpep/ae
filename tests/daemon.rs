@@ -445,9 +445,41 @@ fn a_stalled_client_cannot_keep_the_daemon_alive() {
     cleanup(&sock);
 }
 
+/// What the daemon has served is the one number that says whether callers are
+/// using it or quietly falling back to their own engine at ten times the
+/// memory. The fallback is otherwise invisible from anywhere.
+#[test]
+fn status_counts_what_the_daemon_served() {
+    let sock = scratch_socket("served");
+    let (ok, msg) = run(&sock, &["--daemon"], "30");
+    assert!(ok, "daemon failed to start: {msg}");
+
+    let served = |label: &str| -> u64 {
+        let (up, body) = run(&sock, &["--status", "-j"], "30");
+        assert!(up, "{label}: {body}");
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["served"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{label}: status has no served count: {body}"))
+    };
+
+    // Status and liveness probes are not work, and must not inflate the count.
+    assert_eq!(served("fresh"), 0);
+    assert!(connectable(&sock));
+    assert_eq!(served("after probes"), 0);
+
+    query(&sock, "Check the OKR board.");
+    query(&sock, "Another OKR.");
+    assert_eq!(served("after two analyses"), 2);
+
+    assert!(run(&sock, &["--stop"], "30").0);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    cleanup(&sock);
+}
+
 /// The daemon detaches, so its stderr is the only account of why it died — and
 /// `/dev/null` is not an account. It writes beside its socket, and says enough
-/// to be worth reading.
+/// to be worth reading. It also *appends*: a crash loop is what the log is most
+/// needed for, and truncating per start would erase it on the way in.
 #[test]
 fn the_daemon_logs_beside_its_socket() {
     let sock = scratch_socket("logfile");
@@ -457,7 +489,7 @@ fn the_daemon_logs_beside_its_socket() {
     let log = sock.with_extension("log");
     assert!(
         wait_until(Duration::from_secs(2), || std::fs::read_to_string(&log)
-            .is_ok_and(|body| body.contains("leader listening"))),
+            .is_ok_and(|body| body.contains("listening on"))),
         "daemon log missing or silent: {:?}",
         std::fs::read_to_string(&log)
     );
@@ -473,6 +505,17 @@ fn the_daemon_logs_beside_its_socket() {
     assert!(
         !body.contains("connection error"),
         "routine probes logged as errors: {body}"
+    );
+
+    // A second daemon's account joins the first rather than replacing it.
+    assert!(run(&sock, &["--daemon"], "30").0);
+    assert!(run(&sock, &["--stop"], "30").0);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    let body = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        body.matches("listening on").count(),
+        2,
+        "log did not survive a restart: {body}"
     );
 
     wait_until(Duration::from_secs(2), || !connectable(&sock));

@@ -90,8 +90,10 @@ the process thread.
 - CLI struct: `text`, `--daemon`, `--stop`, `--status`, `--format
   {human,json,ndjson}`, `--socket`, `--verbose`.
 - `--status` probes the daemon read-only (never starts one) and reports its
-  version, pid, uptime, and active embedder; exits non-zero when none is up, so
-  `--status -q` is a silent health check.
+  version, pid, uptime, active embedder, and how many analyses it has served;
+  exits non-zero when none is up, so `--status -q` is a silent health check.
+  The served count against the caller's own is what says whether the daemon is
+  being used or bypassed — the in-process fallback is otherwise invisible.
 - Input source picks the mode: a positional `text` argument is analyzed as one
   blob; piped stdin and `--file` are streamed line by line (flushed per line for
   human/NDJSON; pretty JSON buffers an array). `-d` sends either through the
@@ -113,8 +115,10 @@ resource collisions across duplicate client windows.
   and `AE_CLIENT_TIMEOUT_SECS` (default 5s) for the answer, then self-heals
   in-process; the Leader bounds its side too, so a stalled client can't pin a
   serving thread.
-- The Leader's stderr is a log beside the socket (`<socket>.log`), truncated per
-  start. It detaches, so nothing else can account for why it died.
+- The Leader's stderr is a log beside the socket (`<socket>.log`), appended
+  across daemons and capped at 1MiB. It detaches, so nothing else can account
+  for why it died — and a crash loop is what the log is most needed for, so it
+  must survive a restart.
 - Lazy janitor: `AE_IDLE_SECS` (default 300s) without a finished request removes
   the socket and exits. In-flight requests don't gate it — that would let one
   stuck client keep the daemon alive forever — they get a bounded drain.
