@@ -7,7 +7,7 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
-## Unreleased
+## 0.6.2 — 2026-08-21
 - `-d` now streams piped stdin and `--file` through the daemon instead of
   opening a private engine per invocation: ~12MB per call rather than ~120MB,
   because the model is loaded once, by the daemon. Anything calling `ae` on
