@@ -210,7 +210,16 @@ pub enum Command {
 /// Entry point — parse, set up logging, dispatch by role, render.
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
-    init_logging(cli.verbose);
+    // The daemon's stderr is a log file rather than a terminal, and a file that
+    // explains nothing is worse than no file — so it logs at info by default.
+    // Not debug: the janitor fingerprints the binary twice a second.
+    init_logging(if cli.verbose {
+        "debug"
+    } else if cli.serve {
+        "info"
+    } else {
+        "warn"
+    });
     let fmt = cli.format();
 
     // Dictionary management runs against the DB directly and exits.
@@ -1167,8 +1176,7 @@ fn default_db_path() -> PathBuf {
     base.join("ae").join("acronyms.db")
 }
 
-fn init_logging(verbose: bool) {
-    let level = if verbose { "debug" } else { "warn" };
+fn init_logging(level: &str) {
     let _ = env_logger::Builder::new()
         .target(env_logger::Target::Stderr)
         .parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| level.into()))

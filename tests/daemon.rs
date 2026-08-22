@@ -20,7 +20,7 @@ fn scratch_socket(label: &str) -> PathBuf {
 }
 
 fn cleanup(socket: &Path) {
-    for ext in ["sock", "db", "db-wal", "db-shm", "lock"] {
+    for ext in ["sock", "db", "db-wal", "db-shm", "lock", "log"] {
         let _ = std::fs::remove_file(socket.with_extension(ext));
     }
 }
@@ -115,7 +115,7 @@ fn spawn(socket: &Path, args: &[&str]) -> std::process::Child {
         .env("AE_CONSOLIDATE_SECS", "-1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap()
 }
@@ -442,5 +442,63 @@ fn a_stalled_client_cannot_keep_the_daemon_alive() {
         "daemon stayed up while a stalled client held a serving thread"
     );
 
+    cleanup(&sock);
+}
+
+/// The daemon detaches, so its stderr is the only account of why it died — and
+/// `/dev/null` is not an account. It writes beside its socket, and says enough
+/// to be worth reading.
+#[test]
+fn the_daemon_logs_beside_its_socket() {
+    let sock = scratch_socket("logfile");
+    let (ok, msg) = run(&sock, &["--daemon"], "30");
+    assert!(ok, "daemon failed to start: {msg}");
+
+    let log = sock.with_extension("log");
+    assert!(
+        wait_until(Duration::from_secs(2), || std::fs::read_to_string(&log)
+            .is_ok_and(|body| body.contains("leader listening"))),
+        "daemon log missing or silent: {:?}",
+        std::fs::read_to_string(&log)
+    );
+
+    assert!(run(&sock, &["--stop"], "30").0);
+    wait_until(Duration::from_secs(2), || !connectable(&sock));
+    cleanup(&sock);
+}
+
+/// "It exited" is not a diagnosis. A daemon that can't take the lock lost it to
+/// something that isn't serving — a stale daemon, the one case retrying never
+/// fixes — so the error has to name it and the file, not just report a death.
+#[test]
+fn a_daemon_that_cannot_take_the_lock_says_so() {
+    let sock = scratch_socket("stale");
+    let (ok, msg) = run(&sock, &["--daemon"], "30");
+    assert!(ok, "daemon failed to start: {msg}");
+    let (up, body) = run(&sock, &["--status", "-j"], "30");
+    assert!(up, "{body}");
+    let pid = serde_json::from_str::<serde_json::Value>(&body).unwrap()["pid"]
+        .as_u64()
+        .expect("status reports a pid");
+
+    // The reported state: the lock is held, but nothing answers the socket.
+    std::fs::remove_file(&sock).unwrap();
+    let out = run_bounded(spawn(&sock, &["-d"]), Duration::from_secs(10))
+        .expect("caller hung instead of reporting a failed start");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "reported success with no daemon: {said}"
+    );
+    assert!(
+        said.contains("stale daemon") && said.contains(".lock"),
+        "error names neither the lock nor the cause: {said}"
+    );
+
+    let _ = Command::new("kill").arg(pid.to_string()).status();
     cleanup(&sock);
 }

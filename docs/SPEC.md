@@ -113,6 +113,8 @@ resource collisions across duplicate client windows.
   and `AE_CLIENT_TIMEOUT_SECS` (default 5s) for the answer, then self-heals
   in-process; the Leader bounds its side too, so a stalled client can't pin a
   serving thread.
+- The Leader's stderr is a log beside the socket (`<socket>.log`), truncated per
+  start. It detaches, so nothing else can account for why it died.
 - Lazy janitor: `AE_IDLE_SECS` (default 300s) without a finished request removes
   the socket and exits. In-flight requests don't gate it — that would let one
   stuck client keep the daemon alive forever — they get a bounded drain.

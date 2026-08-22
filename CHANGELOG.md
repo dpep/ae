@@ -7,6 +7,18 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
+## Unreleased
+- A daemon that fails to start now says why. Its stderr goes to a log beside the
+  socket (`/tmp/ae.log`), truncated at each start, instead of `/dev/null` — a
+  detached process that died silently could not be debugged at any verbosity,
+  from anywhere. It logs at info by default, and `RUST_LOG` and `RUST_BACKTRACE`
+  reach it, since the daemon inherits the environment that spawned it.
+- "daemon exited during startup" now distinguishes its two causes. Something
+  holding the lock without serving — a stale daemon, the one case a retry never
+  resolves — is named as such, with the file and the way out; anything else
+  points at the log. A caller that lost the election to a daemon that *is*
+  coming up now waits for it rather than reporting a failure.
+
 ## 0.6.2 — 2026-08-21
 - `-d` now streams piped stdin and `--file` through the daemon instead of
   opening a private engine per invocation: ~12MB per call rather than ~120MB,

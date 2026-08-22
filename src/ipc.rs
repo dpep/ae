@@ -73,6 +73,13 @@ pub fn lock_path(socket: &Path) -> PathBuf {
     socket.with_extension("lock")
 }
 
+/// Where the daemon's stderr goes. It detaches, so this file is the only place
+/// its logs — and the reason it died — can be read. Truncated at each start, so
+/// it describes the daemon that is running now.
+pub fn log_path(socket: &Path) -> PathBuf {
+    socket.with_extension("log")
+}
+
 fn idle_timeout() -> Duration {
     let secs = std::env::var("AE_IDLE_SECS")
         .ok()
@@ -184,12 +191,17 @@ pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
+    // stderr goes to a file, not /dev/null: a detached process that fails
+    // silently can't be debugged at any verbosity, from anywhere.
+    let log = File::create(log_path(socket))
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null());
     // Its own process group: the daemon outlives the (often short-lived, often
     // signalled) caller that happened to start it.
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(log)
         .process_group(0)
         .spawn()?;
 
@@ -200,9 +212,16 @@ pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result
         }
         // A child that lost the lock election exits immediately. Reap it here —
         // otherwise it lingers as a zombie for as long as we live — and stop
-        // waiting for a socket it was never going to bind.
+        // waiting for a socket it was never going to bind. Give the winner that
+        // beat us a moment to bind first: someone else getting there is success.
         if matches!(child.try_wait(), Ok(Some(_))) {
-            return Err(io::Error::other("daemon exited during startup"));
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(100));
+                if UnixStream::connect(socket).is_ok() {
+                    return Ok(DaemonOutcome::AlreadyRunning);
+                }
+            }
+            return Err(startup_failure(socket));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -210,6 +229,29 @@ pub fn start_daemon(socket: &Path, db: &Path, model: Option<&str>) -> io::Result
         io::ErrorKind::TimedOut,
         "daemon did not come up",
     ))
+}
+
+/// Explain a daemon that spawned and vanished. There are two cases and they
+/// have different fixes, so say which one this is: either something already
+/// holds the lock without serving — a stale daemon, the one thing a retry will
+/// never resolve — or it died on its own, and the log says why.
+fn startup_failure(socket: &Path) -> io::Error {
+    let lock = lock_path(socket);
+    let held = File::create(&lock)
+        .map(|f| f.try_lock_exclusive().is_err())
+        .unwrap_or(false);
+    if held {
+        io::Error::other(format!(
+            "{} is held by a process that isn't serving {} — likely a stale daemon (pkill -f 'ae --__serve')",
+            lock.display(),
+            socket.display()
+        ))
+    } else {
+        io::Error::other(format!(
+            "daemon exited during startup; see {}",
+            log_path(socket).display()
+        ))
+    }
 }
 
 // ---- leader / server -----------------------------------------------------
