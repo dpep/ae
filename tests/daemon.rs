@@ -40,6 +40,10 @@ fn run(socket: &Path, args: &[&str], idle_secs: &str) -> (bool, String) {
         .stderr(Stdio::piped())
         .output()
         .unwrap();
+    // Failures report on stderr; surface it, since the harness shows it on panic.
+    if !out.status.success() {
+        eprintln!("ae {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -508,7 +512,12 @@ fn the_daemon_logs_beside_its_socket() {
     );
 
     // A second daemon's account joins the first rather than replacing it.
-    assert!(run(&sock, &["--daemon"], "30").0);
+    let (ok, _) = run(&sock, &["--daemon"], "30");
+    assert!(
+        ok,
+        "second daemon failed to start; log: {:?}",
+        std::fs::read_to_string(&log)
+    );
     assert!(run(&sock, &["--stop"], "30").0);
     wait_until(Duration::from_secs(2), || !connectable(&sock));
     let body = std::fs::read_to_string(&log).unwrap_or_default();
