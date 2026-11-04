@@ -449,6 +449,25 @@ fn a_stalled_client_cannot_keep_the_daemon_alive() {
     cleanup(&sock);
 }
 
+/// "Stopped" has to mean the lock is free. A Leader unlinks its socket before it
+/// drains and exits, so returning on the ack hands `--stop && --daemon` a
+/// replacement that loses the election to a daemon on its way out. A stalled
+/// client holds the drain open, which makes that window wide enough to hit.
+#[test]
+fn a_daemon_can_start_as_soon_as_stop_returns() {
+    let sock = scratch_socket("restart");
+    let (ok, msg) = run(&sock, &["--daemon"], "30");
+    assert!(ok, "daemon failed to start: {msg}");
+
+    let _stalled = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+    assert!(run(&sock, &["--stop"], "30").0);
+    let (ok, msg) = run(&sock, &["--daemon"], "30");
+    assert!(ok, "restart after --stop failed: {msg}");
+
+    assert!(run(&sock, &["--stop"], "30").0);
+    cleanup(&sock);
+}
+
 /// What the daemon has served is the one number that says whether callers are
 /// using it or quietly falling back to their own engine at ten times the
 /// memory. The fallback is otherwise invisible from anywhere.
