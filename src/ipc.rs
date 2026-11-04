@@ -208,9 +208,24 @@ pub fn stop(socket: &Path) -> io::Result<bool> {
         Ok(mut stream) => {
             write_frame(&mut stream, &serde_json::to_vec(&Request::Stop).unwrap())?;
             let _ = read_frame(&mut stream); // best-effort ack
+            wait_for_lock_release(socket);
             Ok(true)
         }
         Err(_) => Ok(false),
+    }
+}
+
+/// Block until the Leader has exited, i.e. released its lock. The ack comes
+/// before it drains and tears down, and a daemon started in that window loses
+/// the election to one on its way out. Bounded: drain is, plus teardown slack.
+fn wait_for_lock_release(socket: &Path) {
+    let deadline = Instant::now() + DRAIN_TIMEOUT + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let free = File::create(lock_path(socket)).is_ok_and(|f| f.try_lock_exclusive().is_ok());
+        if free {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

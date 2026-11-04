@@ -8,6 +8,10 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
+- `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
+  `ae --stop && ae --daemon` could fail with "daemon exited during startup" (or
+  blame a stale daemon) because the old daemon still held the lock while it
+  drained.
 - `ae --status` reports `served`: how many analyses this daemon has answered.
   Checked against how often the caller thinks it ran, it is the one signal that
   says whether the daemon is being used or every call is quietly falling back
