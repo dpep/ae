@@ -7,7 +7,7 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
-## Unreleased
+## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
   `ae --stop && ae --daemon` could fail with "daemon exited during startup" (or
   blame a stale daemon) because the old daemon still held the lock while it
