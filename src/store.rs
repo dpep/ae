@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS acronym_dictionary (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_acronym_lookup
     ON acronym_dictionary(acronym, expansion);
 
+-- Mined rows outnumber confirmed ones by orders of magnitude; without this,
+-- every confirmed-only query (run per request) scans all of them.
+CREATE INDEX IF NOT EXISTS idx_acronym_source
+    ON acronym_dictionary(source, acronym);
+
 CREATE TABLE IF NOT EXISTS acronym_contexts (
     acronym_id INTEGER NOT NULL REFERENCES acronym_dictionary(id),
     context_embedding BLOB NOT NULL
@@ -1099,6 +1104,38 @@ mod tests {
                 .any(|(e, c, _)| e == "minimum viable product" && *c == 2)
         );
         assert!(pots.iter().any(|(e, _, _)| e == "most valuable player"));
+    }
+
+    #[test]
+    fn per_request_lookups_narrow_past_mined_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let plan = |sql: &str| -> String {
+            let mut stmt = s
+                .conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+                .join("; ")
+        };
+        // (query, what its plan must narrow by)
+        let cases = [
+            (
+                "SELECT COUNT(*) FROM acronym_dictionary WHERE source IN ('user', 'inline')",
+                "source=?",
+            ),
+            // Not by source alone: that walks every mined row.
+            (
+                "SELECT expansion FROM acronym_dictionary WHERE acronym = 'X' AND source = 'mined'",
+                "acronym=?",
+            ),
+        ];
+        for (sql, narrows_by) in cases {
+            let p = plan(sql);
+            assert!(p.contains(narrows_by), "{sql}: {p}");
+        }
     }
 
     #[test]

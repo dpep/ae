@@ -30,6 +30,9 @@ releases are grouped at the end.
   (`Broken pipe` in the daemon log).
   The request that triggers it now gets its reply first, and `ae --status`
   answers even while the daemon is mid-request.
+- Each analysis no longer scans every mined expansion to check whether the
+  dictionary changed. On a dictionary with tens of thousands of mined rows that
+  scan was most of the per-line cost. The index is added on first open.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
