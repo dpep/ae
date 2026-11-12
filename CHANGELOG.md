@@ -30,9 +30,10 @@ releases are grouped at the end.
   (`Broken pipe` in the daemon log).
   The request that triggers it now gets its reply first, and `ae --status`
   answers even while the daemon is mid-request.
-- Each analysis no longer scans every mined expansion to check whether the
-  dictionary changed. On a dictionary with tens of thousands of mined rows that
-  scan was most of the per-line cost. The index is added on first open.
+- Each analysis no longer scans every mined expansion and every seen-once
+  candidate to check whether the dictionary changed. On a dictionary with tens
+  of thousands of mined rows those scans were most of the per-line cost. The
+  indexes are added on first open.
 - A running daemon now expands acronyms added with `ae add` / `ae define`
   from another shell. Before, its in-memory index was built once at startup,
   so they went unexpanded until it restarted.

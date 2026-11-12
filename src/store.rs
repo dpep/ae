@@ -83,12 +83,25 @@ CREATE TABLE IF NOT EXISTS meta (
 
 /// Indexes over columns the migrations in [`Store::init`] may have just added,
 /// so they run after them.
-const MIGRATED_INDEXES: &str = "
+fn migrated_indexes() -> String {
+    format!(
+        "
 -- Mined rows outnumber confirmed ones by orders of magnitude; without this,
 -- every confirmed-only query (run per request) scans all of them.
 CREATE INDEX IF NOT EXISTS idx_acronym_source
     ON acronym_dictionary(source, acronym);
-";
+
+-- Just the watch list, so counting it per request doesn't scan every
+-- seen-once candidate.
+CREATE INDEX IF NOT EXISTS idx_candidate_watch
+    ON candidate_acronyms(acronym) WHERE {WATCHED};
+"
+    )
+}
+
+/// The watch-list predicate. Queries must repeat it verbatim: SQLite only uses
+/// a partial index whose WHERE term it can see in the query.
+const WATCHED: &str = "(source = 'declared' OR count >= 3)";
 
 /// How often an acronym must be *seen* (or be declared) before it joins the
 /// watch list and we mine its expansions from unrelated text.
@@ -163,7 +176,7 @@ impl Store {
             "ALTER TABLE candidate_acronyms ADD COLUMN source TEXT NOT NULL DEFAULT 'seen'",
             [],
         );
-        conn.execute_batch(MIGRATED_INDEXES)?;
+        conn.execute_batch(&migrated_indexes())?;
         Ok(Self { conn })
     }
 
@@ -232,27 +245,27 @@ impl Store {
     }
 
     /// The watch list: acronyms we hunt expansions for — declared, or seen at
-    /// least `min_count` times (promoted from noise to "of interest").
-    pub fn watch_list(&self, min_count: i64) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
+    /// least [`WATCH_THRESHOLD`] times (promoted from noise to "of interest").
+    pub fn watch_list(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT acronym FROM candidate_acronyms
-             WHERE (source = 'declared' OR count >= ?1)
-               AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)",
-        )?;
+             WHERE {WATCHED} AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)"
+        ))?;
         let rows = stmt
-            .query_map(params![min_count], |row| row.get(0))?
+            .query_map([], |row| row.get(0))?
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
     }
 
     /// How many acronyms are on the watch list — a cheap signal for whether the
     /// mineable set changed (vs rebuilding to find out).
-    pub fn watch_list_count(&self, min_count: i64) -> Result<i64> {
+    pub fn watch_list_count(&self) -> Result<i64> {
         self.conn.query_row(
-            "SELECT COUNT(*) FROM candidate_acronyms
-             WHERE (source = 'declared' OR count >= ?1)
-               AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)",
-            params![min_count],
+            &format!(
+                "SELECT COUNT(*) FROM candidate_acronyms
+                 WHERE {WATCHED} AND acronym NOT IN (SELECT acronym FROM ignored_acronyms)"
+            ),
+            [],
             |row| row.get(0),
         )
     }
@@ -1160,6 +1173,10 @@ mod tests {
                 "SELECT expansion FROM acronym_dictionary WHERE acronym = 'X' AND source = 'mined'",
                 "acronym=?",
             ),
+            (
+                &format!("SELECT COUNT(*) FROM candidate_acronyms WHERE {WATCHED}"),
+                "idx_candidate_watch",
+            ),
         ];
         for (sql, narrows_by) in cases {
             let p = plan(sql);
@@ -1212,11 +1229,24 @@ mod tests {
     }
 
     #[test]
+    fn the_watch_list_starts_at_the_threshold() {
+        let s = Store::open_in_memory().unwrap();
+        for _ in 0..WATCH_THRESHOLD {
+            s.record_candidate("ZQX").unwrap();
+        }
+        for _ in 1..WATCH_THRESHOLD {
+            s.record_candidate("ZQY").unwrap();
+        }
+        assert_eq!(s.watch_list().unwrap(), vec!["ZQX".to_string()]);
+        assert_eq!(s.watch_list_count().unwrap(), 1);
+    }
+
+    #[test]
     fn declared_acronyms_are_on_the_watch_list_and_survive_pruning() {
         let s = Store::open_in_memory().unwrap();
         s.declare_acronym("MVP").unwrap();
         s.record_candidate("XX").unwrap(); // seen once → prunable noise
-        assert!(s.watch_list(3).unwrap().contains(&"MVP".to_string()));
+        assert!(s.watch_list().unwrap().contains(&"MVP".to_string()));
         s.prune_noise_candidates(0).unwrap(); // no grace → prune immediately
         let acrs: Vec<String> = s
             .candidates()
@@ -1343,7 +1373,7 @@ mod tests {
         s.record_potential("XX", "extra example", 1.0).unwrap(); // no-op
         assert!(s.candidates().unwrap().iter().all(|(a, _)| a != "XX"));
         assert!(s.potentials_for("XX").unwrap().is_empty());
-        assert!(!s.watch_list(1).unwrap().contains(&"XX".to_string()));
+        assert!(!s.watch_list().unwrap().contains(&"XX".to_string()));
         assert_eq!(s.ignored_count().unwrap(), 1);
     }
 

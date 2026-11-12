@@ -17,8 +17,6 @@ use crate::trie::SharedTrie;
 use crate::types::{AnalysisPayload, ExpansionResult, MatchCandidate};
 use crate::{learn, types::Extraction};
 
-use crate::store::WATCH_THRESHOLD;
-
 /// How often the consolidation auto-job may run, in seconds — `AE_CONSOLIDATE_SECS`,
 /// default 1 day. A negative value disables it (used by tests); `0` makes it run
 /// every write.
@@ -385,7 +383,7 @@ impl Engine {
     fn sync_dictionary(&self) -> rusqlite::Result<Arc<MiningTrie>> {
         let signature = (
             self.store.count()?,
-            self.store.watch_list_count(WATCH_THRESHOLD)?,
+            self.store.watch_list_count()?,
             self.store.ignored_count()?,
         );
         let mut cache = self.mining_cache.lock().unwrap();
@@ -397,7 +395,7 @@ impl Engine {
         }
         let known = self.store.all_acronyms()?;
         self.trie.replace(&known);
-        let watched = self.store.watch_list(WATCH_THRESHOLD)?;
+        let watched = self.store.watch_list()?;
         let mut trie = MiningTrie::default();
         for acronym in watched.iter().chain(&known).filter(|a| is_mine_worthy(a)) {
             trie.insert(acronym);
