@@ -191,9 +191,10 @@ fn daemon_flag_with_input_warms_and_serves() {
 fn idle_daemon_reaps_itself() {
     let sock = scratch_socket("janitor");
 
-    let (ok, _) = run(&sock, &["--daemon"], "1"); // 1-second idle timeout
-    assert!(ok);
-    assert!(connectable(&sock));
+    let (ok, body) = run(&sock, &["--daemon"], "1"); // 1-second idle timeout
+    // Not a connect probe: under a loaded test run, the second this CLI takes to
+    // exit can already be the whole idle window.
+    assert!(ok && body.contains("started"), "{body}");
 
     // Leave it strictly alone past the timeout — note any connection (even a
     // probe) counts as activity and re-arms the janitor, so we must not poll.
