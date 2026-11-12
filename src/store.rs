@@ -386,9 +386,10 @@ impl Store {
         if acronym.is_empty() || expansion.is_empty() || self.is_ignored(&acronym)? {
             return Ok(());
         }
+        // last_seen is explicit: a column added by migration has no default.
         self.conn.execute(
-            "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum)
-             VALUES (?1, ?2, 'mined', 1, ?3)
+            "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum, last_seen)
+             VALUES (?1, ?2, 'mined', 1, ?3, CURRENT_TIMESTAMP)
              ON CONFLICT(acronym, expansion) DO UPDATE
                SET count = count + 1, coh_sum = coh_sum + ?3, last_seen = CURRENT_TIMESTAMP",
             params![acronym, expansion, coherence as f64],
@@ -527,7 +528,7 @@ impl Store {
         for (expansion, count, coh, last_seen) in &clusters {
             self.conn.execute(
                 "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum, last_seen)
-                 VALUES (?1, ?2, 'mined', ?3, ?4, COALESCE(?5, CURRENT_TIMESTAMP))",
+                 VALUES (?1, ?2, 'mined', ?3, ?4, ?5)",
                 params![acronym, expansion, count, coh, last_seen],
             )?;
         }
@@ -1125,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn opens_a_database_from_before_the_source_columns() {
+    fn a_legacy_database_opens_and_stamps_new_mined_rows() {
         let path = std::env::temp_dir().join(format!("ae-legacy-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         Connection::open(&path)
@@ -1143,9 +1144,16 @@ mod tests {
                      VALUES ('KPI', 'Key Performance Indicator');",
             )
             .unwrap();
-        let opened = Store::open(&path).map(|s| s.count());
+        let opened = Store::open(&path).and_then(|s| {
+            // ADD COLUMN can't carry a CURRENT_TIMESTAMP default, so a new row
+            // must stamp last_seen itself or it never counts as recent.
+            s.record_potential("ZQX", "zebra quilt exchange", 1.0)?;
+            Ok((s.count()?, s.recent_potentials(3600)?))
+        });
         let _ = std::fs::remove_file(&path);
-        assert_eq!(opened.unwrap().unwrap(), 1);
+        let (count, recent) = opened.unwrap();
+        assert_eq!(count, 1);
+        assert!(recent.contains(&("ZQX".into(), "zebra quilt exchange".into())));
     }
 
     #[test]

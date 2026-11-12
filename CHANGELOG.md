@@ -37,6 +37,9 @@ releases are grouped at the end.
 - A running daemon now expands acronyms added with `ae add` / `ae define`
   from another shell. Before, its in-memory index was built once at startup,
   so they went unexpanded until it restarted.
+- On a dictionary first created before 0.3.3, newly mined expansions were
+  stored with no "last seen" time, so pruning never gave them the grace window
+  and dropped them at the next pass.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
