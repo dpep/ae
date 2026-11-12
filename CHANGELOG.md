@@ -11,6 +11,10 @@ releases are grouped at the end.
 - Analysis embeds a line only when something reads the embedding — a known
   expansion to score or a candidate to track. Plain prose skips inference,
   which was most of the daemon's CPU when fed streamed command output.
+- Mining skips acronyms with fewer than three letters. `C.S` passed the old
+  three-*character* check and collected thousands of junk expansions; 2-letter
+  candidates were mined from their own sentence. Existing junk rows age out
+  through `ae prune`.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,

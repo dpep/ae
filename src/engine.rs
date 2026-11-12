@@ -323,7 +323,7 @@ impl Engine {
 
         let base = self.base_mining_trie()?;
         let mut present = MiningTrie::default();
-        for acronym in candidates {
+        for acronym in candidates.iter().filter(|a| is_mine_worthy(a)) {
             present.insert(acronym);
         }
         // Present-trie hits are *same-sentence* co-occurrences: the acronym
@@ -374,7 +374,7 @@ impl Engine {
         Ok(())
     }
 
-    /// The cached base mining trie (watch list ∪ known acronyms, length ≥ 3).
+    /// The cached base mining trie (watch list ∪ known acronyms, 3+ letters).
     /// Rebuilt only when the cheap `(known, watch-list)` signature changes —
     /// which also catches out-of-band edits (`add`/`rm`/`watch`/…) since they
     /// move those counts — or when it ages past [`MINING_TRIE_MAX_AGE`].
@@ -390,15 +390,10 @@ impl Engine {
         });
         if !fresh {
             let mut trie = MiningTrie::default();
-            for acronym in self.store.watch_list(WATCH_THRESHOLD)? {
-                if acronym.chars().count() >= 3 {
-                    trie.insert(&acronym);
-                }
-            }
-            for acronym in self.store.all_acronyms()? {
-                if acronym.chars().count() >= 3 {
-                    trie.insert(&acronym);
-                }
+            let watched = self.store.watch_list(WATCH_THRESHOLD)?;
+            let known = self.store.all_acronyms()?;
+            for acronym in watched.iter().chain(&known).filter(|a| is_mine_worthy(a)) {
+                trie.insert(acronym);
             }
             *cache = Some(MiningCache {
                 trie: Arc::new(trie),
@@ -417,6 +412,17 @@ impl Engine {
             None => 1.0,
         })
     }
+}
+
+/// Whether an acronym is long enough to mine. Two letters match nearly any
+/// adjacent word pair, so their "expansions" are noise. Counts letters, not
+/// characters — `C.S` is two letters, not three.
+fn is_mine_worthy(acronym: &str) -> bool {
+    acronym
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .count()
+        >= 3
 }
 
 /// The text's embedding, computed on first use. Inference dominates the cost of
@@ -727,6 +733,17 @@ mod tests {
         store.seed_defaults().unwrap();
         let e = Engine::new(store, Box::new(CountingEmbedder(calls.clone()))).unwrap();
         (e, calls)
+    }
+
+    #[test]
+    fn two_letter_acronyms_are_not_mined() {
+        let e = Engine::in_memory().unwrap();
+        for _ in 0..3 {
+            e.analyze("the C.S and ZQ teams own the call sites and zone quotas")
+                .unwrap();
+        }
+        assert!(e.potentials_for("C.S").unwrap().is_empty());
+        assert!(e.potentials_for("ZQ").unwrap().is_empty());
     }
 
     #[test]
