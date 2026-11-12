@@ -171,7 +171,8 @@ pub enum Command {
         expansions: Vec<String>,
     },
     /// Garbage-collect speculation: merge prefix-duplicate expansions, drop
-    /// low-confidence ones, and remove seen-once noise candidates.
+    /// ones that never recurred or score low, and remove seen-once noise
+    /// candidates.
     Prune {
         /// Drop expansions below this confidence (default 0.15).
         #[arg(long)]
@@ -515,10 +516,7 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
     let quiet = cli.quiet;
     match command {
         // Read-only commands produce only output, so `--quiet` is a no-op exit.
-        Command::List { filter } if quiet => {
-            let _ = filter;
-            ExitCode::SUCCESS
-        }
+        Command::List { .. } if quiet => ExitCode::SUCCESS,
         Command::List { filter } => {
             let entries = match filter {
                 Some(f) => store.search(f),
@@ -765,14 +763,14 @@ fn run_suggest(
 }
 
 /// GC speculation: spell-correct mined expansions, dedup (prefix + fuzzy), drop
-/// low-confidence ones, and remove seen-once noise candidates.
+/// ones that never recurred or score low, and remove seen-once noise candidates.
 fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) -> ExitCode {
     match store.consolidate(min, crate::engine::prune_grace_secs()) {
         Ok(s) => {
             if !quiet {
                 match fmt {
                     Format::Human => println!(
-                        "ae: pruned — corrected {}, merged {}, dropped {} low-confidence, removed {} noise candidates",
+                        "ae: pruned — corrected {}, merged {}, dropped {} weak expansions, removed {} noise candidates",
                         s.corrected, s.merged, s.dropped, s.candidates
                     ),
                     _ => println!(
