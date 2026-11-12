@@ -487,10 +487,10 @@ fn handle_connection(
                 }
             };
             SERVED.fetch_add(1, Ordering::Relaxed);
-            let payload = result.unwrap_or_else(|e| {
-                log::warn!("analysis failed: {e}");
-                AnalysisPayload::empty(text)
-            });
+            // Hang up rather than reply empty: an empty payload reads as "no
+            // acronyms", while a dropped connection makes the caller fall back
+            // in-process and surface the real error.
+            let payload = result.map_err(|e| io::Error::other(format!("analysis failed: {e}")))?;
             write_frame(&mut stream, &serde_json::to_vec(&payload)?)?;
             // The warm daemon consolidates on a cadence across requests — after
             // replying, so the caller that tripped it isn't the one kept waiting.
@@ -625,6 +625,43 @@ mod tests {
             assert_eq!(status.embedder, "hash");
             drop(busy);
         });
+    }
+
+    #[test]
+    fn a_failed_analysis_hangs_up_instead_of_replying_empty() {
+        let db = std::env::temp_dir().join(format!("ae-fail-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let store = crate::store::Store::open(&db).unwrap();
+        let engine = Engine::new(store, Box::new(crate::embed::HashEmbedder::new())).unwrap();
+        // Break the store underneath the engine so the next analysis errors.
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute("DROP TABLE candidate_acronyms", [])
+            .unwrap();
+        let engine = Mutex::new(engine);
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let request = Request::Analyze {
+            text: "the ZQX rollout slipped".into(),
+            read_only: false,
+        };
+        write_frame(&mut client, &serde_json::to_vec(&request).unwrap()).unwrap();
+        let shutdown = AtomicBool::new(false);
+        let socket = Path::new("/nonexistent.sock");
+        let served = handle_connection(
+            server,
+            &engine,
+            "hash",
+            socket,
+            socket,
+            &shutdown,
+            Instant::now(),
+        );
+        assert!(served.is_err());
+        assert!(read_frame(&mut client).is_err());
+        let _ = std::fs::remove_file(&db);
     }
 
     #[test]

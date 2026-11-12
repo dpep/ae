@@ -8,6 +8,9 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
+- When the daemon fails to analyze a line it now hangs up instead of replying
+  with an empty result, so the caller falls back in-process and reports the
+  real error rather than "no acronyms".
 - Analysis embeds a line only when something reads the embedding — a known
   expansion to score or a candidate to track. Plain prose skips inference,
   which was most of the daemon's CPU when fed streamed command output.
