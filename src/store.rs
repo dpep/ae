@@ -373,28 +373,37 @@ impl Store {
         Ok(())
     }
 
-    /// Add a mined expansion with an explicit count/coherence (accumulating if
-    /// it already exists) — used by `prune` to move a spell-corrected row.
-    pub fn accumulate_potential(
-        &self,
-        acronym: &str,
-        expansion: &str,
-        count: i64,
-        coh: f64,
-    ) -> Result<()> {
-        let acronym = acronym.trim().to_uppercase();
-        let expansion = expansion.trim().to_lowercase();
-        if acronym.is_empty() || expansion.is_empty() {
-            return Ok(());
-        }
+    /// Rename a mined expansion, merging into `to` if that row already exists.
+    /// Keeps the older evidence's `last_seen`, so a corrected row stays as
+    /// prunable as it was rather than looking freshly seen.
+    fn move_potential(&self, acronym: &str, from: &str, to: &str) -> Result<()> {
+        // `WHERE` disambiguates INSERT…SELECT from the upsert's ON clause.
         self.conn.execute(
-            "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum)
-             VALUES (?1, ?2, 'mined', ?3, ?4)
+            "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum, last_seen)
+             SELECT acronym, ?3, 'mined', count, coh_sum, last_seen FROM acronym_dictionary
+             WHERE acronym = ?1 AND expansion = ?2 AND source = 'mined'
              ON CONFLICT(acronym, expansion) DO UPDATE
-               SET count = count + ?3, coh_sum = coh_sum + ?4, last_seen = CURRENT_TIMESTAMP",
-            params![acronym, expansion, count, coh],
+               SET count = count + excluded.count,
+                   coh_sum = coh_sum + excluded.coh_sum,
+                   last_seen = MAX(last_seen, excluded.last_seen)",
+            params![acronym, from, to],
         )?;
+        self.delete_potential(acronym, from)?;
         Ok(())
+    }
+
+    /// Spell-correct every mined expansion against `words` (see
+    /// [`crate::spell::correct`]), returning how many were rewritten.
+    fn spell_correct_potentials(&self, words: &std::collections::HashSet<String>) -> Result<usize> {
+        let mut corrected = 0;
+        for (acronym, expansion, _, _) in self.all_potentials()? {
+            let fixed = crate::spell::correct(&expansion, words);
+            if fixed != expansion {
+                self.move_potential(&acronym, &expansion, &fixed)?;
+                corrected += 1;
+            }
+        }
+        Ok(corrected)
     }
 
     /// Speculative `(expansion, count, coh_sum)` rows for one acronym.
@@ -550,17 +559,10 @@ impl Store {
     pub fn consolidate(&self, min_confidence: f32, grace_secs: i64) -> Result<ConsolidateStats> {
         // 1. Spell-correct mined words against the system list (if installed), so
         //    fixed forms then merge in dedup.
-        let mut corrected = 0;
-        if let Some(words) = crate::spell::load_wordlist() {
-            for (acronym, expansion, count, coh) in self.all_potentials()? {
-                let fixed = crate::spell::correct(&expansion, &words);
-                if fixed != expansion {
-                    self.delete_potential(&acronym, &expansion)?;
-                    self.accumulate_potential(&acronym, &fixed, count, coh)?;
-                    corrected += 1;
-                }
-            }
-        }
+        let corrected = match crate::spell::load_wordlist() {
+            Some(words) => self.spell_correct_potentials(&words)?,
+            None => 0,
+        };
         // 2. Merge near-duplicate expansions.
         let mut merged = 0;
         for acronym in self.distinct_potential_acronyms()? {
@@ -1123,6 +1125,35 @@ mod tests {
                 .unwrap()
                 .contains(&("KPI".into(), "key performance indicator".into()))
         );
+    }
+
+    #[test]
+    fn spell_correction_preserves_age_and_merges_counts() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_potential("MVP", "minimum viabel product", 1.0)
+            .unwrap();
+        s.record_potential("MVP", "minimum viable product", 1.0)
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE acronym_dictionary SET last_seen = datetime('now', '-2 hours')
+                 WHERE source = 'mined'",
+                [],
+            )
+            .unwrap();
+        let words: std::collections::HashSet<String> = ["minimum", "viable", "product"]
+            .iter()
+            .map(|w| w.to_string())
+            .collect();
+        assert_eq!(s.spell_correct_potentials(&words).unwrap(), 1);
+        let pots = s.potentials_for("MVP").unwrap();
+        assert_eq!(pots.len(), 1);
+        assert_eq!(
+            (pots[0].0.as_str(), pots[0].1),
+            ("minimum viable product", 2)
+        );
+        // Corrected, not re-sighted — it stays as prunable as it was.
+        assert!(s.recent_potentials(3600).unwrap().is_empty());
     }
 
     #[test]

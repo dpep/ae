@@ -23,6 +23,8 @@ releases are grouped at the end.
 - `ae prune` spell-correction no longer changes a word's first letter, so it
   can't turn a mined expansion into one that no longer spells its acronym
   (`coding` was being "corrected" to `boding`).
+- A spell-corrected mined expansion keeps its age. Correcting one used to mark
+  it as just seen, sparing it from pruning for another grace window.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
