@@ -35,11 +35,6 @@ CREATE TABLE IF NOT EXISTS acronym_dictionary (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_acronym_lookup
     ON acronym_dictionary(acronym, expansion);
 
--- Mined rows outnumber confirmed ones by orders of magnitude; without this,
--- every confirmed-only query (run per request) scans all of them.
-CREATE INDEX IF NOT EXISTS idx_acronym_source
-    ON acronym_dictionary(source, acronym);
-
 CREATE TABLE IF NOT EXISTS acronym_contexts (
     acronym_id INTEGER NOT NULL REFERENCES acronym_dictionary(id),
     context_embedding BLOB NOT NULL
@@ -84,6 +79,15 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+";
+
+/// Indexes over columns the migrations in [`Store::init`] may have just added,
+/// so they run after them.
+const MIGRATED_INDEXES: &str = "
+-- Mined rows outnumber confirmed ones by orders of magnitude; without this,
+-- every confirmed-only query (run per request) scans all of them.
+CREATE INDEX IF NOT EXISTS idx_acronym_source
+    ON acronym_dictionary(source, acronym);
 ";
 
 /// How often an acronym must be *seen* (or be declared) before it joins the
@@ -159,6 +163,7 @@ impl Store {
             "ALTER TABLE candidate_acronyms ADD COLUMN source TEXT NOT NULL DEFAULT 'seen'",
             [],
         );
+        conn.execute_batch(MIGRATED_INDEXES)?;
         Ok(Self { conn })
     }
 
@@ -1104,6 +1109,30 @@ mod tests {
                 .any(|(e, c, _)| e == "minimum viable product" && *c == 2)
         );
         assert!(pots.iter().any(|(e, _, _)| e == "most valuable player"));
+    }
+
+    #[test]
+    fn opens_a_database_from_before_the_source_columns() {
+        let path = std::env::temp_dir().join(format!("ae-legacy-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE acronym_dictionary (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     acronym TEXT NOT NULL,
+                     expansion TEXT NOT NULL,
+                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+                 CREATE TABLE candidate_acronyms (
+                     acronym TEXT PRIMARY KEY,
+                     count INTEGER NOT NULL DEFAULT 1);
+                 INSERT INTO acronym_dictionary (acronym, expansion)
+                     VALUES ('KPI', 'Key Performance Indicator');",
+            )
+            .unwrap();
+        let opened = Store::open(&path).map(|s| s.count());
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(opened.unwrap().unwrap(), 1);
     }
 
     #[test]
