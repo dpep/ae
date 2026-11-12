@@ -113,7 +113,7 @@ impl Engine {
     /// candidate on the pass that discovers it, then as a known expansion
     /// thereafter.
     pub fn analyze(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
-        let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
+        let query_vec = QueryVec::new(self.embedder.as_ref(), text);
         let ignored = self.store.ignored_set()?;
 
         let expansions = self.expand(text, &query_vec, &ignored)?;
@@ -136,7 +136,7 @@ impl Engine {
     /// without extracting or persisting anything. The dictionary is never
     /// written, so this is safe to run against a shared DB without side effects.
     pub fn expand_only(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
-        let query_vec = compress_matryoshka_vector(&self.embedder.embed(text));
+        let query_vec = QueryVec::new(self.embedder.as_ref(), text);
         let ignored = self.store.ignored_set()?;
         let expansions = self.expand(text, &query_vec, &ignored)?;
         let candidates = candidate_acronyms(text, &expansions, &[], &ignored);
@@ -154,7 +154,7 @@ impl Engine {
     fn expand(
         &self,
         text: &str,
-        query_vec: &[f32],
+        query_vec: &QueryVec,
         ignored: &std::collections::HashSet<String>,
     ) -> rusqlite::Result<Vec<ExpansionResult>> {
         let mut results: Vec<ExpansionResult> = Vec::new();
@@ -209,14 +209,14 @@ impl Engine {
     /// matches the expansion's recorded contexts (`0.5` — neutral — with no
     /// evidence yet). This is P(expansion | acronym, context), distinct from
     /// validity.
-    fn contextual(&self, id: i64, query_vec: &[f32]) -> rusqlite::Result<f32> {
+    fn contextual(&self, id: i64, query_vec: &QueryVec) -> rusqlite::Result<f32> {
         let contexts = self.store.contexts_for(id)?;
         if contexts.is_empty() {
             return Ok(0.5);
         }
         let best = contexts
             .iter()
-            .map(|c| cosine_similarity(query_vec, c))
+            .map(|c| cosine_similarity(query_vec.get(), c))
             .fold(0.0_f32, f32::max)
             .clamp(0.0, 1.0);
         Ok(best)
@@ -311,7 +311,12 @@ impl Engine {
     /// trie (watch list ∪ known acronyms) is cached across requests (see
     /// [`Self::base_mining_trie`]); the candidates *seen in this text* are mined
     /// via a tiny per-request trie, so a brand-new one is caught on first sight.
-    fn mine(&self, text: &str, query_vec: &[f32], candidates: &[String]) -> rusqlite::Result<()> {
+    fn mine(
+        &self,
+        text: &str,
+        query_vec: &QueryVec,
+        candidates: &[String],
+    ) -> rusqlite::Result<()> {
         for acronym in candidates {
             self.store.record_candidate(acronym)?;
         }
@@ -363,7 +368,8 @@ impl Engine {
         // Fold this text into each present candidate's context — after mining, so
         // the coherence above reflects prior sightings, not this one.
         for acronym in candidates {
-            self.store.update_candidate_context(acronym, query_vec)?;
+            self.store
+                .update_candidate_context(acronym, query_vec.get())?;
         }
         Ok(())
     }
@@ -405,11 +411,35 @@ impl Engine {
 
     /// Cosine of this text's embedding against where `acronym` usually appears
     /// (`1.0` when we have no history yet — neutral, don't penalize).
-    fn context_coherence(&self, acronym: &str, query_vec: &[f32]) -> rusqlite::Result<f32> {
+    fn context_coherence(&self, acronym: &str, query_vec: &QueryVec) -> rusqlite::Result<f32> {
         Ok(match self.store.candidate_context_mean(acronym)? {
-            Some(mean) => cosine_similarity(query_vec, &mean).clamp(0.0, 1.0),
+            Some(mean) => cosine_similarity(query_vec.get(), &mean).clamp(0.0, 1.0),
             None => 1.0,
         })
+    }
+}
+
+/// The text's embedding, computed on first use. Inference dominates the cost of
+/// an analysis, and most lines never need it — nothing to score, no candidate
+/// context to fold into.
+struct QueryVec<'a> {
+    embedder: &'a dyn Embedder,
+    text: &'a str,
+    vec: std::cell::OnceCell<Vec<f32>>,
+}
+
+impl<'a> QueryVec<'a> {
+    fn new(embedder: &'a dyn Embedder, text: &'a str) -> Self {
+        Self {
+            embedder,
+            text,
+            vec: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn get(&self) -> &[f32] {
+        self.vec
+            .get_or_init(|| compress_matryoshka_vector(&self.embedder.embed(self.text)))
     }
 }
 
@@ -675,6 +705,44 @@ fn is_acronym_shaped(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Counts inference calls, so tests can assert when the model is skipped.
+    struct CountingEmbedder(Arc<AtomicUsize>);
+
+    impl Embedder for CountingEmbedder {
+        fn embed(&self, text: &str) -> Vec<f32> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            HashEmbedder::new().embed(text)
+        }
+
+        fn kind(&self) -> &'static str {
+            "counting"
+        }
+    }
+
+    fn counting_engine() -> (Engine, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = Store::open_in_memory().unwrap();
+        store.seed_defaults().unwrap();
+        let e = Engine::new(store, Box::new(CountingEmbedder(calls.clone()))).unwrap();
+        (e, calls)
+    }
+
+    #[test]
+    fn plain_prose_skips_inference() {
+        let (e, calls) = counting_engine();
+        e.analyze("nothing much happened here today").unwrap();
+        e.expand_only("nothing much happened here today").unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_candidate_still_gets_embedded() {
+        let (e, calls) = counting_engine();
+        e.analyze("the ZQX rollout slipped").unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn expands_a_seeded_acronym() {

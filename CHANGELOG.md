@@ -7,6 +7,11 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
+## Unreleased
+- Analysis embeds a line only when something reads the embedding — a known
+  expansion to score or a candidate to track. Plain prose skips inference,
+  which was most of the daemon's CPU when fed streamed command output.
+
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
   `ae --stop && ae --daemon` could fail with "daemon exited during startup" (or
