@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, Transaction, TransactionBehavior, params};
 
 use crate::mrl::MRL_DIMS;
 
@@ -556,11 +556,24 @@ impl Store {
     /// near-duplicate expansions) run first and boost confidence by pooling
     /// evidence; the *cleanup* steps (drop low-confidence rows and seen-once
     /// noise candidates, both sparing anything within `grace_secs`) follow.
+    ///
+    /// One transaction, so a failure can't strand dedup's delete-and-reinsert
+    /// halfway, and tens of thousands of row writes don't each commit.
     pub fn consolidate(&self, min_confidence: f32, grace_secs: i64) -> Result<ConsolidateStats> {
+        let words = crate::spell::load_wordlist();
+        self.in_transaction(|| self.consolidate_rows(words.as_ref(), min_confidence, grace_secs))
+    }
+
+    fn consolidate_rows(
+        &self,
+        words: Option<&std::collections::HashSet<String>>,
+        min_confidence: f32,
+        grace_secs: i64,
+    ) -> Result<ConsolidateStats> {
         // 1. Spell-correct mined words against the system list (if installed), so
         //    fixed forms then merge in dedup.
-        let corrected = match crate::spell::load_wordlist() {
-            Some(words) => self.spell_correct_potentials(&words)?,
+        let corrected = match words {
+            Some(words) => self.spell_correct_potentials(words)?,
             None => 0,
         };
         // 2. Merge near-duplicate expansions.
@@ -596,6 +609,16 @@ impl Store {
             dropped,
             candidates,
         })
+    }
+
+    /// Run `f` in one write transaction, rolled back if it fails. Immediate, so
+    /// a concurrent writer waits on the busy timeout up front instead of
+    /// failing a read-to-write lock upgrade midway.
+    fn in_transaction<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let out = f()?;
+        tx.commit()?;
+        Ok(out)
     }
 
     /// True if consolidation hasn't run within the last `interval_secs` (or has
