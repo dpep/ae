@@ -33,6 +33,9 @@ releases are grouped at the end.
 - Each analysis no longer scans every mined expansion to check whether the
   dictionary changed. On a dictionary with tens of thousands of mined rows that
   scan was most of the per-line cost. The index is added on first open.
+- A running daemon now expands acronyms added with `ae add` / `ae define`
+  from another shell. Before, its in-memory index was built once at startup,
+  so they went unexpanded until it restarted.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,

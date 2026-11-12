@@ -51,7 +51,7 @@ static PUNCTUATED_ACRONYM: LazyLock<Regex> =
 const MINING_TRIE_MAX_AGE: Duration = Duration::from_secs(300);
 
 /// The cached base mining trie (watch list ∪ known acronyms), with the cheap
-/// `(known, watch-list)` signature it was built from and when.
+/// store signature it — and the expansion trie — were last synced at, and when.
 struct MiningCache {
     trie: Arc<MiningTrie>,
     signature: (i64, i64, i64),
@@ -113,6 +113,7 @@ impl Engine {
     /// candidate on the pass that discovers it, then as a known expansion
     /// thereafter.
     pub fn analyze(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
+        let base = self.sync_dictionary()?;
         let query_vec = QueryVec::new(self.embedder.as_ref(), text);
         let ignored = self.store.ignored_set()?;
 
@@ -122,7 +123,7 @@ impl Engine {
 
         // Stage 3: candidate tracking + speculative expansion mining (analysis
         // only — read-only leaves no trace).
-        self.mine(text, &query_vec, &candidates)?;
+        self.mine(text, &query_vec, &candidates, &base)?;
 
         Ok(AnalysisPayload {
             sentence: text.to_string(),
@@ -136,6 +137,7 @@ impl Engine {
     /// without extracting or persisting anything. The dictionary is never
     /// written, so this is safe to run against a shared DB without side effects.
     pub fn expand_only(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
+        self.sync_dictionary()?;
         let query_vec = QueryVec::new(self.embedder.as_ref(), text);
         let ignored = self.store.ignored_set()?;
         let expansions = self.expand(text, &query_vec, &ignored)?;
@@ -307,21 +309,21 @@ impl Engine {
     /// pass and accumulate vector coherence.
     ///
     /// Mining walks the text once over a [`MiningTrie`], emitting every acronym
-    /// whose word initials it spells — O(text), not O(acronyms × text). The base
-    /// trie (watch list ∪ known acronyms) is cached across requests (see
-    /// [`Self::base_mining_trie`]); the candidates *seen in this text* are mined
+    /// whose word initials it spells — O(text), not O(acronyms × text). The
+    /// `base` trie (watch list ∪ known acronyms) is cached across requests (see
+    /// [`Self::sync_dictionary`]); the candidates *seen in this text* are mined
     /// via a tiny per-request trie, so a brand-new one is caught on first sight.
     fn mine(
         &self,
         text: &str,
         query_vec: &QueryVec,
         candidates: &[String],
+        base: &MiningTrie,
     ) -> rusqlite::Result<()> {
         for acronym in candidates {
             self.store.record_candidate(acronym)?;
         }
 
-        let base = self.base_mining_trie()?;
         let mut present = MiningTrie::default();
         for acronym in candidates.iter().filter(|a| is_mine_worthy(a)) {
             present.insert(acronym);
@@ -374,34 +376,39 @@ impl Engine {
         Ok(())
     }
 
-    /// The cached base mining trie (watch list ∪ known acronyms, 3+ letters).
-    /// Rebuilt only when the cheap `(known, watch-list)` signature changes —
-    /// which also catches out-of-band edits (`add`/`rm`/`watch`/…) since they
-    /// move those counts — or when it ages past [`MINING_TRIE_MAX_AGE`].
-    fn base_mining_trie(&self) -> rusqlite::Result<Arc<MiningTrie>> {
+    /// Bring the warm tries in line with the store and return the base mining
+    /// trie (watch list ∪ known acronyms, 3+ letters). Both are rebuilt only
+    /// when the cheap `(known, watch-list, ignored)` signature changes — which
+    /// catches out-of-band edits from another process (`add`/`rm`/`watch`/…)
+    /// since they move those counts — or when it ages past
+    /// [`MINING_TRIE_MAX_AGE`].
+    fn sync_dictionary(&self) -> rusqlite::Result<Arc<MiningTrie>> {
         let signature = (
             self.store.count()?,
             self.store.watch_list_count(WATCH_THRESHOLD)?,
             self.store.ignored_count()?,
         );
         let mut cache = self.mining_cache.lock().unwrap();
-        let fresh = cache.as_ref().is_some_and(|c| {
-            c.signature == signature && c.built_at.elapsed() < MINING_TRIE_MAX_AGE
-        });
-        if !fresh {
-            let mut trie = MiningTrie::default();
-            let watched = self.store.watch_list(WATCH_THRESHOLD)?;
-            let known = self.store.all_acronyms()?;
-            for acronym in watched.iter().chain(&known).filter(|a| is_mine_worthy(a)) {
-                trie.insert(acronym);
-            }
-            *cache = Some(MiningCache {
-                trie: Arc::new(trie),
-                signature,
-                built_at: Instant::now(),
-            });
+        if let Some(c) = cache
+            .as_ref()
+            .filter(|c| c.signature == signature && c.built_at.elapsed() < MINING_TRIE_MAX_AGE)
+        {
+            return Ok(c.trie.clone());
         }
-        Ok(cache.as_ref().unwrap().trie.clone())
+        let known = self.store.all_acronyms()?;
+        self.trie.replace(&known);
+        let watched = self.store.watch_list(WATCH_THRESHOLD)?;
+        let mut trie = MiningTrie::default();
+        for acronym in watched.iter().chain(&known).filter(|a| is_mine_worthy(a)) {
+            trie.insert(acronym);
+        }
+        let trie = Arc::new(trie);
+        *cache = Some(MiningCache {
+            trie: trie.clone(),
+            signature,
+            built_at: Instant::now(),
+        });
+        Ok(trie)
     }
 
     /// Cosine of this text's embedding against where `acronym` usually appears
@@ -1258,6 +1265,27 @@ mod tests {
                 .iter()
                 .any(|r| r.acronym == "OKR")
         );
+    }
+
+    #[test]
+    fn a_warm_engine_expands_an_acronym_added_out_of_band() {
+        let db = std::env::temp_dir().join(format!("ae-oob-{}.db", std::process::id()));
+        let rm = || {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", db.display()));
+            }
+        };
+        rm();
+        let warm = Engine::new(Store::open(&db).unwrap(), Box::new(HashEmbedder::new())).unwrap();
+        warm.analyze("nothing yet").unwrap();
+        // `ae add` from another process: its own connection, same file.
+        Store::open(&db)
+            .unwrap()
+            .add_entry("ZQX", "Zebra Quilt Exchange", "user")
+            .unwrap();
+        let out = warm.analyze("ship the ZQX today").unwrap();
+        rm();
+        assert!(out.expansions.iter().any(|r| r.acronym == "ZQX"), "{out:?}");
     }
 
     #[test]

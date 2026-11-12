@@ -16,6 +16,20 @@ pub struct TrieNode {
     pub is_acronym: bool,
 }
 
+impl TrieNode {
+    fn insert(&mut self, acronym: &str) {
+        let key = acronym.trim().to_uppercase();
+        if key.is_empty() {
+            return;
+        }
+        let mut cur = self;
+        for ch in key.chars() {
+            cur = cur.children.entry(ch).or_default();
+        }
+        cur.is_acronym = true;
+    }
+}
+
 /// A trie behind an `RwLock` so the warm Leader can share reads across
 /// connections while inserts are serialized.
 #[derive(Default)]
@@ -30,16 +44,17 @@ impl SharedTrie {
 
     /// Insert an acronym (case-insensitively). Empty input is ignored.
     pub fn insert(&self, acronym: &str) {
-        let key = acronym.trim().to_uppercase();
-        if key.is_empty() {
-            return;
+        self.root.write().unwrap().insert(acronym);
+    }
+
+    /// Replace the whole contents with `acronyms`, built off-lock so readers
+    /// never see a half-filled trie.
+    pub fn replace<S: AsRef<str>>(&self, acronyms: impl IntoIterator<Item = S>) {
+        let mut fresh = TrieNode::default();
+        for acronym in acronyms {
+            fresh.insert(acronym.as_ref());
         }
-        let mut node = self.root.write().unwrap();
-        let mut cur = &mut *node;
-        for ch in key.chars() {
-            cur = cur.children.entry(ch).or_default();
-        }
-        cur.is_acronym = true;
+        *self.root.write().unwrap() = fresh;
     }
 
     /// True if `acronym` was inserted (case-insensitive exact match).
@@ -107,6 +122,15 @@ mod tests {
         t.insert("   ");
         assert!(t.is_empty());
         assert!(!t.contains(""));
+    }
+
+    #[test]
+    fn replace_drops_what_is_not_in_the_new_set() {
+        let t = SharedTrie::new();
+        t.insert("KPI");
+        t.replace(["OKR"]);
+        assert!(!t.contains("KPI"));
+        assert!(t.contains("OKR"));
     }
 
     #[test]
