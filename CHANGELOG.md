@@ -20,6 +20,9 @@ releases are grouped at the end.
   context history coherence reads as 1.0 — so one-offs piled up indefinitely.
   The default `AE_PRUNE_GRACE_SECS` drops from ~30 days to 7. Run `ae prune`
   once after upgrading to clear the backlog.
+- `ae prune` spell-correction no longer changes a word's first letter, so it
+  can't turn a mined expansion into one that no longer spells its acronym
+  (`coding` was being "corrected" to `boding`).
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,

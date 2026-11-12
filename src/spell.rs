@@ -29,7 +29,8 @@ pub fn load_wordlist() -> Option<HashSet<String>> {
 
 /// Correct an expansion word by word: any word not in `words` is replaced by an
 /// edit-distance-1 neighbour that is, if one exists. Short words (`< 4` chars,
-/// e.g. fillers) are left alone.
+/// e.g. fillers) are left alone, and a correction never changes a word's
+/// initial — the initials are what spell the acronym.
 pub fn correct(expansion: &str, words: &HashSet<String>) -> String {
     expansion
         .split_whitespace()
@@ -43,9 +44,10 @@ fn correct_word(word: &str, words: &HashSet<String>) -> String {
     if lower.chars().count() < 4 || words.contains(&lower) {
         return word.to_string();
     }
+    let initial = lower.chars().next();
     edits1(&lower)
         .into_iter()
-        .find(|c| words.contains(c))
+        .find(|c| c.chars().next() == initial && words.contains(c))
         .unwrap_or_else(|| word.to_string())
 }
 
@@ -102,6 +104,14 @@ mod tests {
         let w = words(&["viable", "and"]);
         // "and" is short; "viable" is known; "qx" has no neighbour → unchanged.
         assert_eq!(correct("viable and qx", &w), "viable and qx");
+    }
+
+    #[test]
+    fn never_changes_a_words_initial() {
+        // "boding" is one substitution from "coding", but it would stop the
+        // phrase spelling its acronym.
+        let w = words(&["boding", "oding", "sessions"]);
+        assert_eq!(correct("coding sessions", &w), "coding sessions");
     }
 
     #[test]
