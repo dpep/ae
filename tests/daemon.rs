@@ -653,3 +653,29 @@ fn the_log_is_capped_while_the_daemon_runs() {
     wait_until(Duration::from_secs(2), || !connectable(&sock));
     cleanup(&sock);
 }
+
+#[test]
+fn restore_stops_a_daemon_holding_the_database() {
+    let sock = scratch_socket("restore");
+    assert!(run(&sock, &["add", "ZQX", "Zebra Quilt Exchange"], "30").0);
+    let (ok, wiped) = run(&sock, &["rm", "--all", "-j"], "30");
+    assert!(ok);
+    let backup = serde_json::from_str::<serde_json::Value>(&wiped).unwrap()["backup"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert!(run(&sock, &["--daemon"], "30").0);
+    // Swapping the file (and deleting its WAL) under a live connection would
+    // leave the daemon writing through a WAL that no longer exists.
+    let (ok, _) = run(&sock, &["rm", "--restore", &backup, "-j"], "30");
+    let _ = std::fs::remove_file(&backup);
+    let daemon_gone = !connectable(&sock);
+    run(&sock, &["--stop"], "30");
+    cleanup(&sock);
+    assert!(ok);
+    assert!(
+        daemon_gone,
+        "restore left the daemon running on the old file"
+    );
+}

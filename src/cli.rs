@@ -321,11 +321,7 @@ fn daemon_serves_requested_db(cli: &Cli) -> bool {
     let Ok(Some(status)) = ipc::status(&cli.socket) else {
         return true; // no daemon answering; run_follower will self-heal
     };
-    let same = |a: &std::path::Path, b: &std::path::Path| {
-        a.canonicalize().unwrap_or_else(|_| a.to_path_buf())
-            == b.canonicalize().unwrap_or_else(|_| b.to_path_buf())
-    };
-    if same(std::path::Path::new(&status.db), &cli.db_path()) {
+    if same_file(Path::new(&status.db), &cli.db_path()) {
         return true;
     }
     log::warn!(
@@ -335,6 +331,11 @@ fn daemon_serves_requested_db(cli: &Cli) -> bool {
         cli.db_path().display()
     );
     false
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    a.canonicalize().unwrap_or_else(|_| a.to_path_buf())
+        == b.canonicalize().unwrap_or_else(|_| b.to_path_buf())
 }
 
 /// Serve one chunk of text: proxy to the daemon if one is up and holds the
@@ -1053,8 +1054,19 @@ fn run_restore(
         Ok(p) => p,
         Err(e) => return fail(fmt, &format!("backup failed: {e}")),
     };
-    // Close the live connection before swapping the file underneath it.
+    // Close the live connections before swapping the file underneath them —
+    // ours, and a daemon's, which would otherwise keep writing through the WAL
+    // we're about to delete.
     drop(store);
+    if let Ok(Some(daemon)) = ipc::status(&cli.socket)
+        && same_file(Path::new(&daemon.db), &db)
+        && let Err(e) = ipc::stop(&cli.socket)
+    {
+        return fail(
+            fmt,
+            &format!("could not stop the daemon before restoring: {e}"),
+        );
+    }
     if let Err(e) = std::fs::copy(&src, &db) {
         return fail(fmt, &format!("restore failed: {e}"));
     }

@@ -40,6 +40,9 @@ releases are grouped at the end.
 - On a dictionary first created before 0.3.3, newly mined expansions were
   stored with no "last seen" time, so pruning never gave them the grace window
   and dropped them at the next pass.
+- `ae rm --restore` stops a daemon serving that dictionary before swapping the
+  file in. It used to replace the file and delete the WAL out from under the
+  daemon's open connection.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,
