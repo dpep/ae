@@ -32,7 +32,7 @@ pub fn consolidate_interval_secs() -> Option<i64> {
 
 /// Grace period (seconds) before a seen-once candidate is eligible for noise
 /// pruning — `AE_PRUNE_GRACE_SECS`, default [`crate::store::DEFAULT_PRUNE_GRACE_SECS`]
-/// (~30 days; `0` prunes immediately, for tests). Recently seen tokens are kept
+/// (7 days; `0` prunes immediately, for tests). Recently seen tokens are kept
 /// so they don't vanish mid-use.
 pub fn prune_grace_secs() -> i64 {
     std::env::var("AE_PRUNE_GRACE_SECS")
@@ -1024,6 +1024,20 @@ mod tests {
         let pots = e.potentials_for("MVP").unwrap();
         assert_eq!(pots.len(), 1);
         assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+    }
+
+    #[test]
+    fn consolidate_drops_a_seen_once_expansion_past_grace_but_keeps_a_recurring_one() {
+        let e = Engine::in_memory().unwrap();
+        e.declare_acronym("MVP").unwrap();
+        e.analyze("we want a minimum viable product").unwrap();
+        e.analyze("ship the minimum viable product").unwrap();
+        e.analyze("a marvelous velvet pillow").unwrap();
+        // A floor of 0 drops nothing on confidence alone; only recurrence counts.
+        e.consolidate(0.0, 0).unwrap();
+        let pots = e.potentials_for("MVP").unwrap();
+        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+        assert!(pots.iter().all(|(p, _)| p != "marvelous velvet pillow"));
     }
 
     #[test]

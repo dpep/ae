@@ -137,9 +137,9 @@ You rarely need to run it by hand: the same pass runs **automatically** on a
 cadence after a write — at most once per `AE_CONSOLIDATE_SECS` (default daily; a
 negative value disables it). The point is the *quality* half — spell-fix and
 dedup pool evidence and lift confidence — so it's worth running regularly; the
-deletion half is gentle (a candidate seen within `AE_PRUNE_GRACE_SECS`, default
-~30 days, is spared, so an infrequent token can recur weeks later before it's
-ever considered noise). The warm daemon amortizes it across requests.
+deletion half is gentle (anything seen within `AE_PRUNE_GRACE_SECS`, default 7
+days, is spared, so an infrequent token has a week to recur before it's
+considered noise). The warm daemon amortizes it across requests.
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An
@@ -147,7 +147,8 @@ acronym can hold several expansions, so multi-select is first-class.
 
 `ae prune` is the occasional GC: it merges prefix-duplicate expansions
 ("min viable product" → "minimum viable product"), drops ones below a confidence
-floor (default 0.15), and removes seen-once noise candidates. `ae suggest` keeps
+floor (default 0.15) or were seen only once, and removes seen-once noise
+candidates. `ae suggest` keeps
 a higher bar by default (0.30) since speculation is noisy; both take
 `--min-confidence` to override, and `suggest` takes `-l/--limit N`.
 

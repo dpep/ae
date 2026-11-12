@@ -15,6 +15,11 @@ releases are grouped at the end.
   three-*character* check and collected thousands of junk expansions; 2-letter
   candidates were mined from their own sentence. Existing junk rows age out
   through `ae prune`.
+- `ae prune` (and the daily auto-job) now drops mined expansions seen only once
+  past the grace window. The confidence floor alone never caught them — with no
+  context history coherence reads as 1.0 — so one-offs piled up indefinitely.
+  The default `AE_PRUNE_GRACE_SECS` drops from ~30 days to 7. Run `ae prune`
+  once after upgrading to clear the backlog.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,

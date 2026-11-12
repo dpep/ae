@@ -89,10 +89,11 @@ pub const WATCH_THRESHOLD: i64 = 3;
 /// below. `suggest` keeps a higher bar of its own.
 pub const PRUNE_MIN_CONFIDENCE: f32 = 0.15;
 
-/// Default grace before a seen-once candidate is eligible for noise pruning.
-/// Volume is low, so we're patient — a token seen once may legitimately recur
-/// days later. ~30 days; override with `AE_PRUNE_GRACE_SECS`.
-pub const DEFAULT_PRUNE_GRACE_SECS: i64 = 30 * 24 * 60 * 60;
+/// Default grace before a seen-once candidate or mined expansion is eligible
+/// for noise pruning — long enough for a real term to recur, short enough that
+/// a streamed corpus doesn't bank months of one-offs. 7 days; override with
+/// `AE_PRUNE_GRACE_SECS`.
+pub const DEFAULT_PRUNE_GRACE_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// A small built-in dictionary so expansion works on a fresh database.
 pub const DEFAULT_DICTIONARY: &[(&str, &str)] = &[
@@ -565,7 +566,10 @@ impl Store {
         for acronym in self.distinct_potential_acronyms()? {
             merged += self.dedup_potentials(&acronym)?;
         }
-        // 3. Drop low-confidence mined rows (sparing recently seen ones).
+        // 3. Drop mined rows that never recurred or score below the floor,
+        //    sparing recently seen ones. Recurrence has to be checked on its
+        //    own: coherence defaults to 1.0 without history, which lifts a
+        //    seen-once row above any sane floor.
         let recent = self.recent_potentials(grace_secs)?;
         let all = self.all_potentials()?;
         let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -574,7 +578,7 @@ impl Store {
         }
         let mut dropped = 0;
         for (acronym, expansion, count, coh) in all {
-            if confidence(count, coh, totals[&acronym]) < min_confidence
+            if (count <= 1 || confidence(count, coh, totals[&acronym]) < min_confidence)
                 && !recent.contains(&(acronym.clone(), expansion.clone()))
             {
                 dropped += self.delete_potential(&acronym, &expansion)?;
