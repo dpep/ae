@@ -25,6 +25,9 @@ releases are grouped at the end.
   (`coding` was being "corrected" to `boding`).
 - A spell-corrected mined expansion keeps its age. Correcting one used to mark
   it as just seen, sparing it from pruning for another grace window.
+- The daily consolidation no longer stalls the daemon for seconds on an
+  acronym with thousands of mined expansions, which timed out callers mid-run
+  (`Broken pipe` in the daemon log).
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,

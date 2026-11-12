@@ -898,35 +898,49 @@ pub fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
 /// within a small edit distance (a typo/misspelling) — the fuzzy dedup `prune`
 /// applies.
 fn similar(a: &str, b: &str) -> bool {
-    if prefix_compatible(a, b) {
-        return true;
-    }
     let max_len = a.chars().count().max(b.chars().count());
-    levenshtein(a, b) <= (max_len / 8).max(1)
+    prefix_compatible(a, b) || within_edits(a, b, (max_len / 8).max(1))
 }
 
-/// Levenshtein edit distance over chars.
-fn levenshtein(a: &str, b: &str) -> usize {
+/// Whether `a` and `b` are at most `k` edits apart (Levenshtein, over chars).
+/// Bails as soon as the answer is no: dedup compares every pair within an
+/// acronym, and one with thousands of mined rows made the full distance a
+/// multi-second stall.
+fn within_edits(a: &str, b: &str, k: usize) -> bool {
+    if a.chars().count().abs_diff(b.chars().count()) > k {
+        return false;
+    }
     let b: Vec<char> = b.chars().collect();
     let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
     for (i, ca) in a.chars().enumerate() {
-        let mut cur = vec![i + 1];
+        cur[0] = i + 1;
         for (j, &cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur.push((prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost));
+            cur[j + 1] = (prev[j + 1] + 1)
+                .min(cur[j] + 1)
+                .min(prev[j] + usize::from(ca != cb));
         }
-        prev = cur;
+        // A row's minimum never decreases further down.
+        if cur.iter().all(|&d| d > k) {
+            return false;
+        }
+        std::mem::swap(&mut prev, &mut cur);
     }
-    prev[b.len()]
+    prev[b.len()] <= k
 }
 
 /// Two expansions are prefix-compatible if they have the same word count and
 /// each word pair is equal or one is a (≥3-char) prefix of the other — so
 /// "min viable product" ≈ "minimum viable product".
 fn prefix_compatible(a: &str, b: &str) -> bool {
-    let aw: Vec<&str> = a.split_whitespace().collect();
-    let bw: Vec<&str> = b.split_whitespace().collect();
-    aw.len() == bw.len() && aw.iter().zip(&bw).all(|(x, y)| word_compatible(x, y))
+    let (mut aw, mut bw) = (a.split_whitespace(), b.split_whitespace());
+    loop {
+        match (aw.next(), bw.next()) {
+            (Some(x), Some(y)) if word_compatible(x, y) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
 }
 
 fn word_compatible(x: &str, y: &str) -> bool {
@@ -1085,6 +1099,31 @@ mod tests {
                 .any(|(e, c, _)| e == "minimum viable product" && *c == 2)
         );
         assert!(pots.iter().any(|(e, _, _)| e == "most valuable player"));
+    }
+
+    #[test]
+    fn within_edits_matches_levenshtein_at_the_boundary() {
+        // (a, b, distance)
+        let cases = [
+            ("kitten", "sitting", 3),
+            ("", "ab", 2),
+            ("abc", "abc", 0),
+            ("abc", "acb", 2),
+            ("flaw", "lawn", 2),
+            ("café", "cafe", 1),
+            ("minimum viable product", "minimum viabel product", 2),
+        ];
+        for (a, b, d) in cases {
+            assert!(within_edits(a, b, d), "{a:?} vs {b:?} within {d}");
+            assert!(within_edits(b, a, d), "{b:?} vs {a:?} within {d}");
+            if d > 0 {
+                assert!(
+                    !within_edits(a, b, d - 1),
+                    "{a:?} vs {b:?} not within {}",
+                    d - 1
+                );
+            }
+        }
     }
 
     #[test]
