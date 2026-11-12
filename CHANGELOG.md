@@ -7,7 +7,7 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
-## Unreleased
+## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
   with an empty result, so the caller falls back in-process and reports the
   real error rather than "no acronyms".
