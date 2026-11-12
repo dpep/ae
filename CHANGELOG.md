@@ -28,6 +28,8 @@ releases are grouped at the end.
 - The daily consolidation no longer stalls the daemon for seconds on an
   acronym with thousands of mined expansions, which timed out callers mid-run
   (`Broken pipe` in the daemon log).
+  The request that triggers it now gets its reply first, and `ae --status`
+  answers even while the daemon is mid-request.
 
 ## 0.7.0 — 2026-11-05
 - `ae --stop` returns once the daemon has exited, not just acknowledged. Before,

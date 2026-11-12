@@ -355,7 +355,10 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
     // to answer". Binding first leaves every caller blocked on a Leader that
     // can't reply yet, and a cold model load is not instant. While we load,
     // there is no socket, so callers self-heal in-process.
-    let engine = Arc::new(Mutex::new(Engine::open(db, model).map_err(to_io)?));
+    let engine = Engine::open(db, model).map_err(to_io)?;
+    // Read once: `--status` must answer even while a long request holds the lock.
+    let embedder = engine.embedder_kind();
+    let engine = Arc::new(Mutex::new(engine));
 
     // We are the sole Leader, so any socket file is stale.
     let _ = std::fs::remove_file(socket);
@@ -391,9 +394,9 @@ pub fn serve(socket: &Path, db: &Path, model: Option<&str>) -> io::Result<()> {
         let served_db = db.to_path_buf();
         std::thread::spawn(move || {
             active.fetch_add(1, Ordering::SeqCst);
-            if let Err(e) =
-                handle_connection(stream, &engine, &sock, &served_db, &shutdown, started)
-            {
+            if let Err(e) = handle_connection(
+                stream, &engine, embedder, &sock, &served_db, &shutdown, started,
+            ) {
                 log::warn!("connection error: {e}");
             }
             active.fetch_sub(1, Ordering::SeqCst);
@@ -456,6 +459,7 @@ fn exe_fingerprint() -> Option<(u64, u64, std::time::SystemTime)> {
 fn handle_connection(
     mut stream: UnixStream,
     engine: &Mutex<Engine>,
+    embedder: &'static str,
     socket: &Path,
     served_db: &Path,
     shutdown: &AtomicBool,
@@ -474,25 +478,30 @@ fn handle_connection(
     let req: Request = serde_json::from_slice(&frame)?;
     match req {
         Request::Analyze { text, read_only } => {
-            let engine = engine.lock().unwrap();
-            let result = if read_only {
-                engine.expand_only(&text)
-            } else {
-                engine.analyze(&text)
+            let result = {
+                let engine = engine.lock().unwrap();
+                if read_only {
+                    engine.expand_only(&text)
+                } else {
+                    engine.analyze(&text)
+                }
             };
             SERVED.fetch_add(1, Ordering::Relaxed);
             let payload = result.unwrap_or_else(|e| {
                 log::warn!("analysis failed: {e}");
                 AnalysisPayload::empty(text)
             });
-            // The warm daemon consolidates on a cadence across requests.
-            if !read_only {
-                let _ = engine.consolidate_if_due(
+            write_frame(&mut stream, &serde_json::to_vec(&payload)?)?;
+            // The warm daemon consolidates on a cadence across requests — after
+            // replying, so the caller that tripped it isn't the one kept waiting.
+            if !read_only
+                && let Err(e) = engine.lock().unwrap().consolidate_if_due(
                     crate::store::PRUNE_MIN_CONFIDENCE,
                     crate::engine::prune_grace_secs(),
-                );
+                )
+            {
+                log::warn!("consolidation failed: {e}");
             }
-            write_frame(&mut stream, &serde_json::to_vec(&payload)?)?;
         }
         Request::Ping => write_frame(&mut stream, b"\x01")?,
         Request::Status => {
@@ -500,7 +509,7 @@ fn handle_connection(
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 pid: std::process::id(),
                 uptime_secs: started.elapsed().as_secs(),
-                embedder: engine.lock().unwrap().embedder_kind().to_string(),
+                embedder: embedder.to_string(),
                 served: SERVED.load(Ordering::Relaxed) as u64,
                 idle_timeout_secs: idle_timeout().as_secs(),
                 db: served_db.display().to_string(),
@@ -585,6 +594,37 @@ mod tests {
         let sock = std::env::temp_dir().join(format!("ae-none-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         assert!(!stop(&sock).unwrap());
+    }
+
+    #[test]
+    fn status_answers_while_the_engine_is_busy() {
+        let engine = Mutex::new(Engine::in_memory().unwrap());
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        std::thread::scope(|s| {
+            // Held in here so a failed assert unwinds it before the join.
+            let busy = engine.lock().unwrap(); // a long analysis or consolidation
+            s.spawn(|| {
+                let shutdown = AtomicBool::new(false);
+                let socket = Path::new("/nonexistent.sock");
+                handle_connection(
+                    server,
+                    &engine,
+                    "hash",
+                    socket,
+                    socket,
+                    &shutdown,
+                    Instant::now(),
+                )
+            });
+            write_frame(&mut client, &serde_json::to_vec(&Request::Status).unwrap()).unwrap();
+            let status: StatusPayload = serde_json::from_slice(&read_frame(&mut client).unwrap())
+                .expect("status reply while the engine is locked");
+            assert_eq!(status.embedder, "hash");
+            drop(busy);
+        });
     }
 
     #[test]

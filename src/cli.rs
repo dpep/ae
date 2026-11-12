@@ -374,10 +374,12 @@ fn evaluate_in_process(cli: &Cli, text: &str) -> rusqlite::Result<crate::types::
     }
     let payload = engine.analyze(text)?;
     // Amortized consolidation on a cadence (best-effort).
-    let _ = engine.consolidate_if_due(
+    if let Err(e) = engine.consolidate_if_due(
         crate::store::PRUNE_MIN_CONFIDENCE,
         crate::engine::prune_grace_secs(),
-    );
+    ) {
+        log::warn!("consolidation failed: {e}");
+    }
     Ok(payload)
 }
 
