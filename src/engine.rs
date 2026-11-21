@@ -163,7 +163,11 @@ impl Engine {
         // Maximal munch: don't expand a "PB" that's really part of a "PB&J".
         let covered = covered_parts(text);
 
-        for token in punctuated_acronyms(text).chain(tokens(text)) {
+        // Acronyms are stored uppercase, so casing is the only signal that `US`
+        // means the country and `us` the pronoun: a lowercase letter rules a
+        // token out.
+        let mentions = mention_tokens(text).filter(|t| !t.chars().any(char::is_lowercase));
+        for token in punctuated_acronyms(text).chain(mentions) {
             if !self.trie.contains(token) {
                 continue;
             }
@@ -657,28 +661,30 @@ fn candidate_acronyms(
             out.push(token.to_string());
         }
     }
-    // Tokenize per word, so an identifier can be skipped whole. Splitting the
-    // full text first would have already shattered `CLAUDE_PLUGIN_ROOT` into
-    // three plausible-looking acronyms.
-    for word in text.split_whitespace() {
-        if is_identifier_word(word) {
+    for token in mention_tokens(text) {
+        let upper = token.to_uppercase();
+        if !is_acronym_shaped(token)
+            || is_noise(token, crate::spell::system_short_words())
+            || covered.contains(&upper)
+            || ignored.contains(&upper)
+        {
             continue;
         }
-        for token in tokens(word) {
-            let upper = token.to_uppercase();
-            if !is_acronym_shaped(token)
-                || is_noise(token, crate::spell::system_short_words())
-                || covered.contains(&upper)
-                || ignored.contains(&upper)
-            {
-                continue;
-            }
-            if !resolved.contains(&upper) && seen.insert(upper) {
-                out.push(token.to_string());
-            }
+        if !resolved.contains(&upper) && seen.insert(upper) {
+            out.push(token.to_string());
         }
     }
     out
+}
+
+/// Tokens of `text` that could be a mention, skipping words that are
+/// identifiers or paths (see [`is_identifier_word`]). Tokenizing per word lets
+/// an identifier be skipped whole: splitting the full text first would shatter
+/// `CLAUDE_PLUGIN_ROOT` or `SKILL.md` into plausible-looking acronyms.
+fn mention_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace()
+        .filter(|w| !is_identifier_word(w))
+        .flat_map(tokens)
 }
 
 /// True when a whitespace-delimited word is an identifier, path, or shell
@@ -838,14 +844,6 @@ mod tests {
             .find(|r| r.acronym == "ZQ")
             .unwrap();
         assert_eq!(zq.matches[0].expansion, "Zebra Queue");
-    }
-
-    #[test]
-    fn text_slice_preserves_original_casing() {
-        let e = Engine::in_memory().unwrap();
-        let out = e.analyze("look at the okr").unwrap();
-        let r = out.expansions.iter().find(|r| r.acronym == "OKR").unwrap();
-        assert_eq!(r.text_slice, "okr");
     }
 
     #[test]
@@ -1497,6 +1495,45 @@ mod tests {
         for (b, a) in before.iter().zip(&after) {
             assert!((b - a).abs() < 1e-6, "{before:?} vs {after:?}");
         }
+    }
+
+    // --- Matching: only acronym-cased mentions outside identifiers ---
+
+    fn expanded(e: &Engine, text: &str) -> Vec<String> {
+        e.expand_only(text)
+            .unwrap()
+            .expansions
+            .into_iter()
+            .map(|r| r.acronym)
+            .collect()
+    }
+
+    #[test]
+    fn a_word_in_lowercase_or_title_case_is_not_an_acronym() {
+        let e = engine_with(&[("US", "United States"), ("IT", "Information Technology")]);
+        for text in ["can you help us fix it", "It works for us", "Us and It"] {
+            assert!(expanded(&e, text).is_empty(), "{text}");
+        }
+        assert_eq!(expanded(&e, "the US and IT teams"), ["US", "IT"]);
+    }
+
+    #[test]
+    fn a_mention_inside_an_identifier_is_not_expanded() {
+        let e = engine_with(&[("ID", "Identifier")]);
+        let text = "see foo_ID, src/ID/x.rs, config.ID.url and $ID";
+        assert!(expanded(&e, text).is_empty(), "{text}");
+        // Sentence punctuation around a real mention still counts.
+        assert_eq!(expanded(&e, "what's the (ID)?"), ["ID"]);
+    }
+
+    #[test]
+    fn punctuated_and_all_caps_mentions_still_expand() {
+        let e = engine_with(&[
+            ("PB&J", "Peanut Butter and Jelly"),
+            ("KPI", "Key Performance Indicator"),
+        ]);
+        assert_eq!(expanded(&e, "pack a PB&J for lunch"), ["PB&J"]);
+        assert_eq!(expanded(&e, "SHIP THE KPI TODAY"), ["KPI"]);
     }
 
     #[test]

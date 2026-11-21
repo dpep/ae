@@ -89,6 +89,10 @@ releases are grouped at the end.
 - Piping `ae` into a reader that stops early (`ae candidates | head`) exits
   quietly with success instead of printing "render failed: Broken pipe" (or a
   JSON error) and failing.
+- A known acronym expands only when written in acronym casing: `us`, `it`
+  and `It` no longer expand as `US` and `IT`, and a mention inside an
+  identifier or path (`src/ID/x.rs`, `config.ID.url`, `foo_ID`) is skipped.
+  `ae "look at the okr"` no longer expands; write `OKR`. Nothing to do.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

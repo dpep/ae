@@ -1139,3 +1139,32 @@ fn output_into_a_closed_pipe_exits_quietly() {
         assert!(stderr.is_empty(), "{args:?} complained: {stderr}");
     }
 }
+
+// --- Precision: matching, alignment, and mining only claim what the text shows ---
+
+/// Acronyms of every expansion finding for `text` (read-only, JSON).
+fn expanded_acronyms(sock: &std::path::Path, text: &str) -> Vec<String> {
+    let out = run(sock, &["-rj"], Some(text));
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let mut names: Vec<String> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "expansion")
+        .map(|f| f["acronym"].as_str().unwrap().to_string())
+        .collect();
+    names.dedup();
+    names
+}
+
+#[test]
+fn an_ordinary_lowercase_word_does_not_expand_as_an_acronym() {
+    let sock = scratch_socket("lowercaseword");
+    assert!(run(&sock, &["add", "US", "United States"], None).success);
+    assert!(run(&sock, &["add", "IT", "Information Technology"], None).success);
+    assert!(expanded_acronyms(&sock, "can you help us fix it").is_empty());
+    assert_eq!(
+        expanded_acronyms(&sock, "the US office runs IT"),
+        ["US", "IT"]
+    );
+}

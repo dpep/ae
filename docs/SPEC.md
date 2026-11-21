@@ -79,6 +79,15 @@ server thread automatically.
        └───────────────────────────┘
 ```
 
+## Matching
+
+A token is a mention of a known acronym only when it is written in acronym
+casing: no lowercase letters (`KPI`, `S3`, `PB&J`). Acronyms are stored
+uppercase, so casing is the only thing that separates `US` from `us` or `IT`
+from `it`. Tokens inside an identifier or path (`src/ID/x.rs`, `config.ID.url`,
+`$ID`, `foo_ID`) are skipped, by the same rule that keeps them off the
+candidate list.
+
 ## Expansion confidence
 
 An expansion finding's `confidence` is the probability that this expansion is
