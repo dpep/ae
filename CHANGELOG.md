@@ -16,6 +16,10 @@ releases are grouped at the end.
   or `ae add` it with no expansion to keep mining for one. Junk candidates
   already recorded stay (`ae prune` only drops seen-once ones); clear each with
   `ae ignore`.
+- `ae rm ACR <expansion>` prefers an exact match: `ae rm PP "Partner Platform"`
+  no longer refuses because "Agent and Partner Platform" also contains it, and
+  `ae rm BK buildkite` picks that exact casing over "Buildkite". Failing an
+  exact match, a unique match ignoring case is used, then the old substring rule.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

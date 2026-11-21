@@ -185,7 +185,8 @@ pub enum Command {
     #[command(visible_alias = "delete")]
     Rm {
         acronym: Option<String>,
-        /// Expansion substring selecting one variant when several exist.
+        /// Expansion selecting one variant when several exist: an exact match
+        /// wins, then a unique match ignoring case, then a substring.
         expansion: Option<String>,
         /// With an acronym: remove every expansion of it. With no acronym: wipe
         /// the entire dictionary (backed up first).
@@ -948,10 +949,8 @@ fn run_rm(
     let targets: Vec<String> = if all {
         all_exps
     } else if let Some(pat) = pattern {
-        let needle = pat.to_lowercase();
-        let matched: Vec<String> = all_exps
-            .iter()
-            .filter(|e| e.to_lowercase().contains(&needle))
+        let matched: Vec<String> = select_expansions(&all_exps, pat)
+            .into_iter()
             .cloned()
             .collect();
         match matched.len() {
@@ -987,6 +986,29 @@ fn run_rm(
         }
     }
     removed_status(fmt, quiet, &acronym, removed)
+}
+
+/// The expansions `rm ACR <pattern>` names: an exact match, else the one
+/// expansion equal ignoring case, else every case-insensitive substring match.
+/// Exact-first is what lets "Partner Platform" beat "Agent and Partner
+/// Platform", and "buildkite" beat "Buildkite", without a flag.
+fn select_expansions<'a>(expansions: &'a [String], pattern: &str) -> Vec<&'a String> {
+    let pattern = pattern.trim();
+    if let Some(exact) = expansions.iter().find(|e| *e == pattern) {
+        return vec![exact];
+    }
+    let needle = pattern.to_lowercase();
+    let folded: Vec<&String> = expansions
+        .iter()
+        .filter(|e| e.to_lowercase() == needle)
+        .collect();
+    if folded.len() == 1 {
+        return folded;
+    }
+    expansions
+        .iter()
+        .filter(|e| e.to_lowercase().contains(&needle))
+        .collect()
 }
 
 /// Wipe the whole dictionary (`rm --all`, no acronym). A timestamped backup is
@@ -1215,4 +1237,50 @@ fn fail(fmt: Format, msg: &str) -> ExitCode {
         _ => eprintln!("{}", serde_json::json!({ "error": msg })),
     }
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rm_selection_prefers_an_exact_match() {
+        let cases: &[(&[&str], &str, &[&str])] = &[
+            // Exact beats a sibling that contains it.
+            (
+                &["Partner Platform", "Agent and Partner Platform"],
+                "Partner Platform",
+                &["Partner Platform"],
+            ),
+            // Case-only siblings: the exact casing wins.
+            (&["Buildkite", "buildkite"], "buildkite", &["buildkite"]),
+            // A unique case-insensitive exact match beats substring siblings.
+            (
+                &["Partner Platform", "Agent and Partner Platform"],
+                "partner platform",
+                &["Partner Platform"],
+            ),
+            // Several case-insensitive matches fall back to substring (ambiguous).
+            (
+                &["Buildkite", "buildkite"],
+                "BUILDKITE",
+                &["Buildkite", "buildkite"],
+            ),
+            // No exact match: case-insensitive substring.
+            (
+                &["Minimum Viable Product", "Most Valuable Player"],
+                "valuable",
+                &["Most Valuable Player"],
+            ),
+            (&["Minimum Viable Product"], "nope", &[]),
+        ];
+        for (variants, pat, want) in cases {
+            let variants: Vec<String> = variants.iter().map(|s| s.to_string()).collect();
+            let got: Vec<&str> = select_expansions(&variants, pat)
+                .into_iter()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(got, *want, "pattern {pat:?} over {variants:?}");
+        }
+    }
 }

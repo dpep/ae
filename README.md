@@ -182,6 +182,11 @@ ae rm MVP valuable  # substring picks one ("Most Valuable Player")
 ae rm MVP --all     # removes every expansion
 ```
 
+An exact expansion always wins over a substring, so `ae rm PP "Partner
+Platform"` removes that one even when "Agent and Partner Platform" also exists.
+Failing an exact match, an expansion equal ignoring case is used if there's
+only one; otherwise the substring rule applies.
+
 `ae candidates` is fed automatically: every analysis records the acronym-shaped
 tokens it couldn't resolve and counts how often you've used them, so you can see
 what's worth defining. (Defining one clears it from the list.) Tokens that are

@@ -801,3 +801,20 @@ fn adding_an_expansion_unmutes_an_ignored_acronym() {
             .any(|f| f["kind"] == "expansion" && f["acronym"] == "OKR")
     );
 }
+
+// --- rm: exact-match selection, --unverified, case-insensitive add ---
+
+#[test]
+fn rm_exact_expansion_beats_a_substring_sibling() {
+    let sock = scratch_socket("rmexact");
+    run(&sock, &["add", "PP", "Partner Platform"], None);
+    run(&sock, &["add", "PP", "Agent and Partner Platform"], None);
+    let out = run(&sock, &["rm", "PP", "Partner Platform", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["removed"], 1);
+    let left = run(&sock, &["show", "PP", "-j"], None);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&left.stdout).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["expansion"], "Agent and Partner Platform");
+}
