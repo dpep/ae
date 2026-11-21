@@ -7,7 +7,7 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
-## Unreleased
+## 0.8.0 — 2026-11-20
 
 After upgrading:
 
