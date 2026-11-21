@@ -94,7 +94,8 @@ releases are grouped at the end.
   identifier or path (`src/ID/x.rs`, `config.ID.url`, `foo_ID`) is skipped.
   `ae "look at the okr"` no longer expands; write `OKR`. Nothing to do.
 - Inline definitions in camel case now count as spelling their acronym:
-  `JSON (JavaScript Object Notation)` and `GitHub (GH)` are learned. One that
+  `JSON (JavaScript Object Notation)` and `GitHub (GH)` are learned, and
+  `ae prune` keeps such rows already in your dictionary. One that
   doesn't spell its acronym is reported as an extraction and nothing more; it
   is not kept for `ae suggest` either. Nothing to do.
 - Expansions are mined only from text that mentions the acronym. Mining a

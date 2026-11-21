@@ -1956,6 +1956,7 @@ mod tests {
                 ("WQ", "Widget Quorum", "inline"), // aligned: kept
                 ("XY", "Red Balloon", "inline"),   // unaligned: dropped
                 ("ZQ", "Red Balloon", "user"),     // yours, aligned or not
+                ("WS", "WidgetSoft", "inline"),    // camel case spells it: kept
             ],
         );
         for id in &ids {
@@ -1969,6 +1970,7 @@ mod tests {
         assert!(s.contexts_for(ids[1]).unwrap().is_empty());
         assert_eq!(s.expansions_for("WQ").unwrap().len(), 1);
         assert_eq!(s.expansions_for("ZQ").unwrap().len(), 1);
+        assert_eq!(s.expansions_for("WS").unwrap().len(), 1);
         assert_eq!(s.stale_confirmed_count().unwrap(), 0);
     }
 
