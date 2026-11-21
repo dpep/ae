@@ -41,8 +41,14 @@ releases are grouped at the end.
   probability between them. It used to be the raw similarity between the
   prompt and the expansion's own words, which sat near zero for most prompts.
   A consumer gating on `confidence` should re-tune its threshold. Junk siblings
-  now dilute a verified expansion's share, so clear them (`ae rm`) to let
-  verified entries score high.
+  now dilute a verified expansion's share. Run `ae rm --unverified` (or
+  `ae rm ACR --unverified`) to clear them and let verified entries score high.
+- An inline definition is added to the dictionary only when its initials spell
+  the acronym (`KPI (Key Performance Indicator)`). Others, which were mostly
+  sentence fragments and names, still show up as extractions but go to
+  `ae suggest` as speculation, and their acronym stays a candidate. Unaligned
+  entries learned before this change remain in the dictionary as `inline`.
+  `ae rm --unverified` clears them.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

@@ -57,6 +57,13 @@ fn candidate(acronym: String, raw_definition: &str, pattern_type: &str) -> Extra
     }
 }
 
+/// Whether an extraction's definition spells its acronym. Only these are
+/// trustworthy enough to confirm; the rest are mostly sentence fragments and
+/// names. Derived from the pair rather than stored, so it can't go stale.
+pub fn is_aligned(e: &Extraction) -> bool {
+    realign(&e.extracted_definition, &e.acronym).1
+}
+
 /// Realign a (possibly noisy) definition to the acronym it defines.
 ///
 /// The definition sits right before the parenthetical, so its final word should
@@ -149,6 +156,18 @@ mod tests {
         let got = extract("Red Balloon (XY) floats.");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].confidence, WEAK);
+        assert!(!is_aligned(&got[0]));
+    }
+
+    #[test]
+    fn a_realigned_definition_stays_aligned() {
+        // The trimmed window must still read as aligned when re-checked.
+        for text in [
+            "Our quarterly Key Performance Indicator (KPI) review.",
+            "Track Objectives and Key Results (OKR) quarterly.",
+        ] {
+            assert!(extract(text).iter().all(is_aligned), "{text}");
+        }
     }
 
     #[test]
