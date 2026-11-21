@@ -72,6 +72,14 @@ releases are grouped at the end.
   database's backups. Older backups stay in `/tmp/ae`; restore one by passing
   its path (`ae rm --restore /tmp/ae/backup_….db`). A bulk remove that would
   remove nothing no longer takes a backup.
+- `ae prune` now brings dictionary entries an older `ae` learned up to the
+  current rules, keeping the good ones: it drops inline definitions whose
+  initials don't spell their acronym, and merges confirmed expansions that
+  differ only in case (yours over an inline one, else the older casing). Run
+  `ae prune` once instead of `ae rm --unverified` to clear inline junk without
+  losing the inline definitions that are right. It backs up first when it
+  changes any entries. Its JSON gains `unaligned_removed`,
+  `case_duplicates_merged` and `backup`. The automatic pass doesn't do this.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

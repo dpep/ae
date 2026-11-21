@@ -173,9 +173,12 @@ pub enum Command {
         acronym: String,
         expansions: Vec<String>,
     },
-    /// Garbage-collect speculation: merge prefix-duplicate expansions, drop
-    /// ones that never recurred or score low, and remove seen-once noise
-    /// candidates and undeclared ones that aren't acronyms (`WHERE`, `V1`).
+    /// Make the dictionary consistent with the current rules: drop inline
+    /// definitions whose initials don't spell their acronym and merge
+    /// case-only duplicates (backed up first), then garbage-collect
+    /// speculation — merge prefix-duplicate expansions, drop ones that never
+    /// recurred or score low, and remove seen-once noise candidates and
+    /// undeclared ones that aren't acronyms (`WHERE`, `V1`).
     Prune {
         /// Drop expansions below this confidence (default 0.15).
         #[arg(long)]
@@ -597,12 +600,18 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             acronym,
             expansions,
         } => run_define(&store, fmt, quiet, acronym, expansions),
-        Command::Prune { min_confidence } => run_prune(
-            &store,
-            fmt,
-            quiet,
-            min_confidence.unwrap_or(crate::store::PRUNE_MIN_CONFIDENCE),
-        ),
+        Command::Prune { min_confidence } => {
+            let db = cli.db_path();
+            let code = run_prune(
+                &store,
+                &db,
+                fmt,
+                quiet,
+                min_confidence.unwrap_or(crate::store::PRUNE_MIN_CONFIDENCE),
+            );
+            rotate_backups(&db);
+            code
+        }
         Command::Rm {
             acronym,
             expansion,
@@ -795,41 +804,68 @@ fn run_suggest(
     ExitCode::SUCCESS
 }
 
-/// GC speculation: drop candidates that aren't acronyms, spell-correct mined
-/// expansions, dedup (prefix + fuzzy), drop ones that never recurred or score
-/// low, and remove seen-once noise candidates.
-fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) -> ExitCode {
-    match store.consolidate(min, crate::engine::prune_grace_secs()) {
-        Ok(s) => {
-            if !quiet {
-                match fmt {
-                    Format::Human => println!(
-                        "ae: pruned — corrected {}, merged {}, dropped {} weak expansions, removed {} noise candidates and {} non-acronym candidates ({} mined expansions)",
-                        s.corrected,
-                        s.merged,
-                        s.dropped,
-                        s.candidates,
-                        s.non_acronyms,
-                        s.non_acronym_expansions
-                    ),
-                    _ => println!(
-                        "{}",
-                        serde_json::json!({
-                            "status": "pruned",
-                            "corrected": s.corrected,
-                            "merged": s.merged,
-                            "dropped": s.dropped,
-                            "candidates_removed": s.candidates,
-                            "non_acronyms_removed": s.non_acronyms,
-                            "non_acronym_expansions_removed": s.non_acronym_expansions,
-                        })
-                    ),
-                }
+/// Make the dictionary consistent with the current rules: drop inline
+/// definitions that don't spell their acronym and merge case-only duplicates
+/// (backing up first, as these are dictionary entries), then GC speculation —
+/// drop candidates that aren't acronyms, spell-correct mined expansions, dedup
+/// (prefix + fuzzy), drop ones that never recurred or score low, and remove
+/// seen-once noise candidates.
+fn run_prune(
+    store: &crate::store::Store,
+    db: &Path,
+    fmt: Format,
+    quiet: bool,
+    min: f32,
+) -> ExitCode {
+    let backup = match store.stale_confirmed_count() {
+        Ok(0) => None,
+        Ok(_) => match snapshot(store, db) {
+            Ok(p) => Some(p),
+            Err(e) => return fail(fmt, &format!("backup failed: {e}")),
+        },
+        Err(e) => return fail(fmt, &format!("prune failed: {e}")),
+    };
+    let s = match store.prune(min, crate::engine::prune_grace_secs()) {
+        Ok(s) => s,
+        Err(e) => return fail(fmt, &format!("prune failed: {e}")),
+    };
+    if !quiet {
+        match fmt {
+            Format::Human => {
+                let saved = backup
+                    .as_ref()
+                    .map(|p| format!(" — backup saved to {}", p.display()))
+                    .unwrap_or_default();
+                println!(
+                    "ae: pruned — dropped {} unaligned inline definitions, merged {} case-only duplicates; corrected {}, merged {}, dropped {} weak expansions, removed {} noise candidates and {} non-acronym candidates ({} mined expansions){saved}",
+                    s.unaligned,
+                    s.case_merged,
+                    s.corrected,
+                    s.merged,
+                    s.dropped,
+                    s.candidates,
+                    s.non_acronyms,
+                    s.non_acronym_expansions
+                )
             }
-            ExitCode::SUCCESS
+            _ => println!(
+                "{}",
+                serde_json::json!({
+                    "status": "pruned",
+                    "unaligned_removed": s.unaligned,
+                    "case_duplicates_merged": s.case_merged,
+                    "corrected": s.corrected,
+                    "merged": s.merged,
+                    "dropped": s.dropped,
+                    "candidates_removed": s.candidates,
+                    "non_acronyms_removed": s.non_acronyms,
+                    "non_acronym_expansions_removed": s.non_acronym_expansions,
+                    "backup": backup.map(|p| p.display().to_string()),
+                })
+            ),
         }
-        Err(e) => fail(fmt, &format!("prune failed: {e}")),
     }
+    ExitCode::SUCCESS
 }
 
 /// Promote a candidate: add the given expansions, or pick interactively from the

@@ -1054,3 +1054,39 @@ fn a_bare_restore_with_no_backups_for_this_database_fails() {
     let sock = scratch_socket("restorenone");
     assert!(!run(&sock, &["rm", "--restore"], None).success);
 }
+
+#[test]
+fn prune_brings_legacy_confirmed_rows_up_to_current_rules_with_a_backup() {
+    let sock = scratch_socket("prunelegacy");
+    store_of(&sock).seed_defaults().unwrap();
+    // Rows an older `ae` wrote: an unaligned inline definition, and case-only
+    // siblings (add_entry folds those now, so plant them directly).
+    let db = rusqlite::Connection::open(sock.with_extension("db")).unwrap();
+    db.execute_batch(
+        "INSERT INTO acronym_dictionary (acronym, expansion, source) VALUES
+           ('XY', 'Red Balloon', 'inline'),
+           ('WQ', 'Widget Quorum', 'inline'),
+           ('WQ', 'widget quorum', 'inline');",
+    )
+    .unwrap();
+    drop(db);
+
+    let out = run(&sock, &["prune", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["unaligned_removed"], 1);
+    assert_eq!(v["case_duplicates_merged"], 1);
+    let backup = v["backup"].as_str().expect("a backup path");
+    assert_eq!(backups_of(&sock), vec![PathBuf::from(backup)]);
+    assert!(shown(&sock, "XY").is_empty());
+    assert_eq!(shown(&sock, "WQ"), vec!["Widget Quorum"]);
+
+    // Nothing left to bring up to date: no backup.
+    let again = run(&sock, &["prune", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&again.stdout).unwrap();
+    assert_eq!(v["unaligned_removed"], 0);
+    assert!(v["backup"].is_null());
+
+    let human = run(&sock, &["prune"], None);
+    assert!(human.stdout.contains("unaligned"), "{}", human.stdout);
+}

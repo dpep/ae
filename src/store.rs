@@ -144,6 +144,29 @@ pub struct ConsolidateStats {
     pub non_acronyms: usize,
     /// Mined expansions dropped along with those candidates.
     pub non_acronym_expansions: usize,
+    /// `inline` rows dropped for not spelling their acronym ([`Store::prune`] only).
+    pub unaligned: usize,
+    /// Confirmed case-only duplicates merged away ([`Store::prune`] only).
+    pub case_merged: usize,
+}
+
+/// Confirmed rows the current rules wouldn't have written — see [`Store::prune`].
+struct StaleConfirmed {
+    /// `inline` rows whose definition doesn't spell the acronym.
+    unaligned: Vec<i64>,
+    /// `(dropped, kept)`: a case-only duplicate and the row it merges into.
+    duplicates: Vec<(i64, i64)>,
+}
+
+/// Whether `expansion`'s initials spell `acronym` — the rule an inline
+/// definition must pass to be confirmed.
+fn spells(acronym: &str, expansion: &str) -> bool {
+    crate::learn::is_aligned(&crate::types::Extraction {
+        acronym: acronym.to_string(),
+        extracted_definition: expansion.to_string(),
+        pattern_type: String::new(),
+        confidence: 0.0,
+    })
 }
 
 /// Dictionary health for `ae stats`: counts, and shares derived from them.
@@ -676,6 +699,100 @@ impl Store {
         self.in_transaction(|| self.consolidate_rows(words.as_ref(), min_confidence, grace_secs))
     }
 
+    /// `ae prune`: bring confirmed rows up to the current rules, then
+    /// [`Self::consolidate`]. Drops `inline` definitions that don't spell their
+    /// acronym (learned before only aligned ones were confirmed), and merges
+    /// case-only duplicates by [`Self::add_entry`]'s rule — strongest source,
+    /// then the oldest row's casing — moving their contexts to the survivor.
+    ///
+    /// The periodic job runs only `consolidate`: deleting dictionary entries is
+    /// left to an explicit prune, which backs up first
+    /// ([`Self::stale_confirmed_count`]).
+    pub fn prune(&self, min_confidence: f32, grace_secs: i64) -> Result<ConsolidateStats> {
+        let words = crate::spell::load_wordlist();
+        self.in_transaction(|| {
+            let stale = self.stale_confirmed()?;
+            for id in &stale.unaligned {
+                self.conn.execute(
+                    "DELETE FROM acronym_contexts WHERE acronym_id = ?1",
+                    params![id],
+                )?;
+                self.conn
+                    .execute("DELETE FROM acronym_dictionary WHERE id = ?1", params![id])?;
+            }
+            for (dropped, kept) in &stale.duplicates {
+                self.conn.execute(
+                    "UPDATE acronym_contexts SET acronym_id = ?2 WHERE acronym_id = ?1",
+                    params![dropped, kept],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM acronym_dictionary WHERE id = ?1",
+                    params![dropped],
+                )?;
+            }
+            Ok(ConsolidateStats {
+                unaligned: stale.unaligned.len(),
+                case_merged: stale.duplicates.len(),
+                ..self.consolidate_rows(words.as_ref(), min_confidence, grace_secs)?
+            })
+        })
+    }
+
+    /// How many confirmed rows [`Self::prune`] would drop or merge.
+    pub fn stale_confirmed_count(&self) -> Result<usize> {
+        let stale = self.stale_confirmed()?;
+        Ok(stale.unaligned.len() + stale.duplicates.len())
+    }
+
+    fn stale_confirmed(&self) -> Result<StaleConfirmed> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, acronym, expansion, source FROM acronym_dictionary
+             WHERE source IN ('user', 'inline')",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut unaligned = Vec::new();
+        let mut siblings: std::collections::HashMap<(String, String), Vec<(u8, i64)>> =
+            std::collections::HashMap::new();
+        for (id, acronym, expansion, source) in rows {
+            if source == "inline" && !spells(&acronym, &expansion) {
+                unaligned.push(id);
+            } else {
+                let key = (acronym, expansion.to_lowercase());
+                siblings
+                    .entry(key)
+                    .or_default()
+                    .push((source_rank(&source), id));
+            }
+        }
+        let mut duplicates = Vec::new();
+        for group in siblings.into_values().filter(|g| g.len() > 1) {
+            let (_, kept) = *group
+                .iter()
+                .max_by_key(|(rank, id)| (*rank, std::cmp::Reverse(*id)))
+                .expect("group has rows");
+            duplicates.extend(
+                group
+                    .iter()
+                    .filter(|(_, id)| *id != kept)
+                    .map(|(_, id)| (*id, kept)),
+            );
+        }
+        Ok(StaleConfirmed {
+            unaligned,
+            duplicates,
+        })
+    }
+
     fn consolidate_rows(
         &self,
         words: Option<&std::collections::HashSet<String>>,
@@ -725,6 +842,7 @@ impl Store {
             candidates,
             non_acronyms,
             non_acronym_expansions,
+            ..ConsolidateStats::default()
         })
     }
 
@@ -969,12 +1087,7 @@ impl Store {
                 }));
             } else {
                 inline += 1;
-                aligned += usize::from(crate::learn::is_aligned(&crate::types::Extraction {
-                    acronym: acronym.clone(),
-                    extracted_definition: expansion.clone(),
-                    pattern_type: String::new(),
-                    confidence: 0.0,
-                }));
+                aligned += usize::from(spells(acronym, expansion));
             }
         }
         let count = |sql: &str| -> Result<usize> {
@@ -1815,5 +1928,101 @@ mod tests {
         assert_eq!(s.delete_unverified(None).unwrap(), 1);
         assert!(s.expansions_for("WQ").unwrap().is_empty());
         assert_eq!(s.expansions_for("ZQ").unwrap().len(), 1);
+    }
+
+    /// Insert rows verbatim, bypassing add_entry's case fold — the shapes a
+    /// database written by an older `ae` holds.
+    fn plant(s: &Store, rows: &[(&str, &str, &str)]) -> Vec<i64> {
+        rows.iter()
+            .map(|(acronym, expansion, source)| {
+                s.conn
+                    .execute(
+                        "INSERT INTO acronym_dictionary (acronym, expansion, source)
+                         VALUES (?1, ?2, ?3)",
+                        params![acronym, expansion, source],
+                    )
+                    .unwrap();
+                s.conn.last_insert_rowid()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn prune_drops_unaligned_inline_rows_and_keeps_the_rest() {
+        let s = Store::open_in_memory().unwrap();
+        let ids = plant(
+            &s,
+            &[
+                ("WQ", "Widget Quorum", "inline"), // aligned: kept
+                ("XY", "Red Balloon", "inline"),   // unaligned: dropped
+                ("ZQ", "Red Balloon", "user"),     // yours, aligned or not
+            ],
+        );
+        for id in &ids {
+            s.add_context(*id, &[0.0; MRL_DIMS]).unwrap();
+        }
+        assert_eq!(s.stale_confirmed_count().unwrap(), 1);
+
+        let stats = s.prune(PRUNE_MIN_CONFIDENCE, 0).unwrap();
+        assert_eq!((stats.unaligned, stats.case_merged), (1, 0));
+        assert!(s.expansions_for("XY").unwrap().is_empty());
+        assert!(s.contexts_for(ids[1]).unwrap().is_empty());
+        assert_eq!(s.expansions_for("WQ").unwrap().len(), 1);
+        assert_eq!(s.expansions_for("ZQ").unwrap().len(), 1);
+        assert_eq!(s.stale_confirmed_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_merges_confirmed_case_duplicates_by_the_add_rule() {
+        let s = Store::open_in_memory().unwrap();
+        let ids = plant(
+            &s,
+            &[
+                // Yours wins over an inline sibling, casing included.
+                ("AST", "Abstract Syntax Tree", "inline"),
+                ("AST", "abstract syntax tree", "user"),
+                // Equal sources: the older row's casing stands.
+                ("WQ", "Widget Quorum", "inline"),
+                ("WQ", "widget quorum", "inline"),
+                // A mined sibling is speculation, not a duplicate to merge.
+                ("ZQ", "Zone Quota", "user"),
+                ("ZQ", "zone quota", "mined"),
+            ],
+        );
+        s.add_context(ids[0], &[0.0; MRL_DIMS]).unwrap();
+        s.add_context(ids[3], &[0.0; MRL_DIMS]).unwrap();
+        assert_eq!(s.stale_confirmed_count().unwrap(), 2);
+
+        let stats = s.prune(PRUNE_MIN_CONFIDENCE, 0).unwrap();
+        assert_eq!((stats.unaligned, stats.case_merged), (0, 2));
+        let shown = |a: &str| s.expansions_for(a).unwrap();
+        assert_eq!(
+            shown("AST"),
+            vec![(ids[1], "abstract syntax tree".into(), "user".into())]
+        );
+        assert_eq!(
+            shown("WQ"),
+            vec![(ids[2], "Widget Quorum".into(), "inline".into())]
+        );
+        // The dropped rows' contexts follow the survivor.
+        assert_eq!(s.contexts_for(ids[1]).unwrap().len(), 1);
+        assert_eq!(s.contexts_for(ids[2]).unwrap().len(), 1);
+        assert_eq!(shown("ZQ").len(), 1);
+    }
+
+    #[test]
+    fn the_periodic_consolidation_leaves_confirmed_rows_alone() {
+        // Deleting dictionary entries takes a backup, which only `ae prune` does.
+        let s = Store::open_in_memory().unwrap();
+        plant(
+            &s,
+            &[
+                ("XY", "Red Balloon", "inline"),
+                ("WQ", "Widget Quorum", "inline"),
+                ("WQ", "widget quorum", "inline"),
+            ],
+        );
+        s.consolidate(PRUNE_MIN_CONFIDENCE, 0).unwrap();
+        assert_eq!(s.stale_confirmed_count().unwrap(), 2);
     }
 }

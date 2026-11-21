@@ -98,7 +98,7 @@ ae stats                              # dictionary health: verified/aligned shar
 ae add PB&J                           # declare a token as an acronym (ae mines its expansion later)
 ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
 ae define MVP                         # promote interactively (fzf), or pass expansions
-ae prune                              # GC: spell-fix + dedup (prefix+fuzzy) + drop noise
+ae prune                              # bring the DB up to current rules, then GC speculation
 ae ignore IOS                         # mute: keep it but make it inert (unignore reverses)
 ae ignore                             # list muted acronyms
 ae rm MVP                             # delete it outright (ignore mutes; rm removes)
@@ -120,8 +120,8 @@ candidates  2, 1 watched
 `verified` is what a person asserted (`user` rows); the schema doesn't record
 which of those were seeded, so `built-in` counts the ones still matching the
 built-in defaults. `aligned` is how many inline-learned expansions have
-initials that spell their acronym; a low share means `ae rm --unverified` is
-worth running. `mined` is speculation (aligned by construction), `watched` the
+initials that spell their acronym; a low share means `ae prune` is worth
+running. `mined` is speculation (aligned by construction), `watched` the
 candidates ae mines for. Shares are rounded to two decimals in JSON (`-j`, or
 `-J` for one line) and are `null` when there's nothing to divide.
 
@@ -175,6 +175,15 @@ ordinary word in caps, a label like `V1`), however often seen, with what was
 mined for them. `ae suggest` keeps
 a higher bar by default (0.30) since speculation is noisy; both take
 `--min-confidence` to override, and `suggest` takes `-l/--limit N`.
+
+`ae prune` also brings confirmed entries an older `ae` wrote up to the current
+rules, keeping the good ones: it drops inline-learned definitions whose initials
+don't spell their acronym (`ae stats` counts them as not `aligned`) and merges
+expansions that differ only in case (your entry wins over an inline one;
+otherwise the older casing stands). These are dictionary entries, so when there's
+any to change it backs up first, like `rm --all`; the JSON reports
+`unaligned_removed`, `case_duplicates_merged` and `backup`. The automatic pass
+never touches confirmed entries.
 
 `ae suggest` is the payoff of tracking candidates. When `ae` analyzes text it
 mines word-sequences whose initials spell a watched candidate acronym — no
