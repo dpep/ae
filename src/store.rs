@@ -138,6 +138,10 @@ pub struct ConsolidateStats {
     pub merged: usize,
     pub dropped: usize,
     pub candidates: usize,
+    /// Candidates [`crate::noise::is_noise`] rejects, however often seen.
+    pub non_acronyms: usize,
+    /// Mined expansions dropped along with those candidates.
+    pub non_acronym_expansions: usize,
 }
 
 impl Store {
@@ -588,8 +592,37 @@ impl Store {
         Ok(n)
     }
 
+    /// Drop undeclared candidates that aren't acronyms by [`crate::noise::is_noise`]
+    /// (recorded before that rule existed), with their mined expansions and
+    /// context. No grace period: the verdict is about the token, not its age.
+    /// Returns `(candidates, mined rows)` removed.
+    pub fn prune_non_acronyms(
+        &self,
+        words: Option<&std::collections::HashSet<String>>,
+    ) -> Result<(usize, usize)> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT acronym FROM candidate_acronyms WHERE source != 'declared'")?;
+        let noise: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>>>()?
+            .into_iter()
+            .filter(|a| crate::noise::is_noise(a, words))
+            .collect();
+        let mut mined = 0;
+        for acronym in &noise {
+            mined += self.conn.execute(
+                "DELETE FROM acronym_dictionary WHERE acronym = ?1 AND source = 'mined'",
+                params![acronym],
+            )?;
+            self.clear_candidate(acronym)?;
+        }
+        Ok((noise.len(), mined))
+    }
+
     /// Consolidate speculation — the shared body of `ae prune` and the periodic
-    /// auto-job. The *quality* steps (spell-correct mined words, then merge
+    /// auto-job. Candidates that aren't acronyms go first, so no effort is spent
+    /// correcting their mined rows. The *quality* steps (spell-correct mined words, then merge
     /// near-duplicate expansions) run first and boost confidence by pooling
     /// evidence; the *cleanup* steps (drop low-confidence rows and seen-once
     /// noise candidates, both sparing anything within `grace_secs`) follow.
@@ -607,6 +640,9 @@ impl Store {
         min_confidence: f32,
         grace_secs: i64,
     ) -> Result<ConsolidateStats> {
+        // 0. Drop candidates that aren't acronyms, and what was mined for them.
+        let (non_acronyms, non_acronym_expansions) =
+            self.prune_non_acronyms(crate::spell::system_short_words())?;
         // 1. Spell-correct mined words against the system list (if installed), so
         //    fixed forms then merge in dedup.
         let corrected = match words {
@@ -645,6 +681,8 @@ impl Store {
             merged,
             dropped,
             candidates,
+            non_acronyms,
+            non_acronym_expansions,
         })
     }
 
@@ -1387,6 +1425,48 @@ mod tests {
             .map(|(a, _)| a)
             .collect();
         assert!(acrs.contains(&"MVP".to_string()) && !acrs.contains(&"XX".to_string()));
+    }
+
+    #[test]
+    fn prune_drops_non_acronym_candidates_however_often_seen() {
+        let s = Store::open_in_memory().unwrap();
+        let words: std::collections::HashSet<String> =
+            ["where", "post"].iter().map(|w| w.to_string()).collect();
+        for _ in 0..3 {
+            s.record_candidate("WHERE").unwrap();
+            s.record_candidate("V1").unwrap();
+            s.record_candidate("ZQX").unwrap();
+        }
+        s.record_potential("WHERE", "we have every real error", 0.9)
+            .unwrap();
+        s.record_potential("ZQX", "zebra queue xray", 0.9).unwrap();
+        s.declare_acronym("POST").unwrap(); // declared: kept though it's a word
+
+        assert_eq!(s.prune_non_acronyms(Some(&words)).unwrap(), (2, 1));
+        let acrs: Vec<String> = s
+            .candidates()
+            .unwrap()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(acrs, ["ZQX", "POST"]);
+        assert!(s.potentials_for("WHERE").unwrap().is_empty());
+        assert_eq!(s.potentials_for("ZQX").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn without_a_wordlist_prune_keeps_word_candidates() {
+        let s = Store::open_in_memory().unwrap();
+        s.record_candidate("WHERE").unwrap();
+        s.record_candidate("TODO").unwrap();
+        assert_eq!(s.prune_non_acronyms(None).unwrap(), (1, 0));
+        let acrs: Vec<String> = s
+            .candidates()
+            .unwrap()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(acrs, ["WHERE"]);
     }
 
     #[test]

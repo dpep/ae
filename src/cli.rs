@@ -172,7 +172,7 @@ pub enum Command {
     },
     /// Garbage-collect speculation: merge prefix-duplicate expansions, drop
     /// ones that never recurred or score low, and remove seen-once noise
-    /// candidates.
+    /// candidates and undeclared ones that aren't acronyms (`WHERE`, `V1`).
     Prune {
         /// Drop expansions below this confidence (default 0.15).
         #[arg(long)]
@@ -775,20 +775,34 @@ fn run_suggest(
     ExitCode::SUCCESS
 }
 
-/// GC speculation: spell-correct mined expansions, dedup (prefix + fuzzy), drop
-/// ones that never recurred or score low, and remove seen-once noise candidates.
+/// GC speculation: drop candidates that aren't acronyms, spell-correct mined
+/// expansions, dedup (prefix + fuzzy), drop ones that never recurred or score
+/// low, and remove seen-once noise candidates.
 fn run_prune(store: &crate::store::Store, fmt: Format, quiet: bool, min: f32) -> ExitCode {
     match store.consolidate(min, crate::engine::prune_grace_secs()) {
         Ok(s) => {
             if !quiet {
                 match fmt {
                     Format::Human => println!(
-                        "ae: pruned — corrected {}, merged {}, dropped {} weak expansions, removed {} noise candidates",
-                        s.corrected, s.merged, s.dropped, s.candidates
+                        "ae: pruned — corrected {}, merged {}, dropped {} weak expansions, removed {} noise candidates and {} non-acronym candidates ({} mined expansions)",
+                        s.corrected,
+                        s.merged,
+                        s.dropped,
+                        s.candidates,
+                        s.non_acronyms,
+                        s.non_acronym_expansions
                     ),
                     _ => println!(
                         "{}",
-                        serde_json::json!({"status": "pruned", "corrected": s.corrected, "merged": s.merged, "dropped": s.dropped, "candidates_removed": s.candidates})
+                        serde_json::json!({
+                            "status": "pruned",
+                            "corrected": s.corrected,
+                            "merged": s.merged,
+                            "dropped": s.dropped,
+                            "candidates_removed": s.candidates,
+                            "non_acronyms_removed": s.non_acronyms,
+                            "non_acronym_expansions_removed": s.non_acronym_expansions,
+                        })
                     ),
                 }
             }

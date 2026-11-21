@@ -149,7 +149,9 @@ acronym can hold several expansions, so multi-select is first-class.
 `ae prune` is the occasional GC: it merges prefix-duplicate expansions
 ("min viable product" → "minimum viable product"), drops ones below a confidence
 floor (default 0.15) or were seen only once, and removes seen-once noise
-candidates. `ae suggest` keeps
+candidates. It also drops undeclared candidates that aren't acronyms (an
+ordinary word in caps, a label like `V1`), however often seen, with what was
+mined for them. `ae suggest` keeps
 a higher bar by default (0.30) since speculation is noisy; both take
 `--min-confidence` to override, and `suggest` takes `-l/--limit N`.
 

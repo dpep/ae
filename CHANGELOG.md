@@ -14,8 +14,7 @@ releases are grouped at the end.
   and `INFO`/`DEBUG`/`TODO`/`FIXME`. A real acronym that is also a word (`SLA`,
   `ETA`, `CAT`) is no longer surfaced as a candidate; define it with `ae add`,
   or `ae add` it with no expansion to keep mining for one. Junk candidates
-  already recorded stay (`ae prune` only drops seen-once ones); clear each with
-  `ae ignore`.
+  already recorded are cleared by `ae prune` (below).
 - `ae rm ACR <expansion>` prefers an exact match: `ae rm PP "Partner Platform"`
   no longer refuses because "Agent and Partner Platform" also contains it, and
   `ae rm BK buildkite` picks that exact casing over "Buildkite". Failing an
@@ -54,6 +53,12 @@ releases are grouped at the end.
   split confidence evenly whatever the prompt said. Nothing to do. Contexts
   stored offline before this change still match, just more weakly, and fill
   in as `ae` sees the acronym again.
+- `ae prune` (and the periodic auto-prune) now drops recorded candidates that
+  aren't acronyms by the new candidate rule, however often they were seen,
+  along with the expansions mined for them. Run `ae prune` once to clear the `WHERE`,
+  `NOT`, `TODO` and `V1` already on your candidate list. Acronyms you declared
+  with a bare `ae add` are kept. Its JSON gains `non_acronyms_removed` and
+  `non_acronym_expansions_removed`.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

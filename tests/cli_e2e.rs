@@ -886,3 +886,53 @@ fn add_folds_an_expansion_differing_only_in_case() {
     run(&sock, &["add", "BK", "Buildkite"], None);
     assert_eq!(shown(&sock, "BK").len(), 1);
 }
+
+// --- prune clears non-acronym candidates; `ae stats` ---
+
+/// Open the test's DB directly, to plant rows the CLI can no longer create
+/// (candidates recorded before the noise rule existed).
+fn store_of(sock: &std::path::Path) -> acronym_engine::store::Store {
+    acronym_engine::store::Store::open(&sock.with_extension("db")).unwrap()
+}
+
+fn candidate_names(sock: &std::path::Path) -> Vec<String> {
+    let out = run(sock, &["candidates", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["acronym"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn prune_clears_recorded_non_acronyms_but_not_declared_ones() {
+    let sock = scratch_socket("prunenoise");
+    {
+        // TODO/V1/INFO are noise with or without a system wordlist.
+        let s = store_of(&sock);
+        for _ in 0..3 {
+            s.record_candidate("TODO").unwrap();
+            s.record_candidate("V1").unwrap();
+            s.record_candidate("ZQX").unwrap();
+        }
+        for _ in 0..2 {
+            s.record_potential("TODO", "the other day only", 0.9)
+                .unwrap();
+        }
+        s.declare_acronym("INFO").unwrap();
+    }
+
+    let out = run(&sock, &["prune", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["non_acronyms_removed"], 2);
+    assert_eq!(v["non_acronym_expansions_removed"], 1);
+
+    let mut names = candidate_names(&sock);
+    names.sort();
+    assert_eq!(names, ["INFO", "ZQX"]);
+
+    let human = run(&sock, &["prune"], None);
+    assert!(human.stdout.contains("non-acronym"), "{}", human.stdout);
+}
