@@ -131,7 +131,9 @@ Embed SQLite, optimize the indexing schemas, and implement the normalization
 needed to prune 384-dimensional vectors down to 64 dimensions.
 
 - `acronym_dictionary(id, acronym, expansion, created_at)` with a unique index
-  on `(acronym, expansion)`, and one on `(source, acronym)` so confirmed-only
+  on `(acronym, expansion)` (case-sensitive, but adding an expansion that
+  differs only in case updates the existing row instead of inserting a
+  sibling), and one on `(source, acronym)` so confirmed-only
   lookups don't scan the (far larger) set of mined rows. Candidate acronyms
   carry a partial index over just the watch list, for the same reason.
 - `ignored_acronyms(acronym, created_at)`: a mute list. Ignored acronyms stay in

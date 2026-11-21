@@ -26,6 +26,12 @@ releases are grouped at the end.
   first. If inline learning has filled your dictionary with junk, run
   `ae rm --unverified` to keep only what you added (and the built-in defaults);
   `ae rm --restore` undoes it.
+- Expansions that differ only in case are now one row: learning or adding
+  `buildkite` next to an existing `Buildkite` no longer creates a sibling. The
+  existing row keeps its casing unless a stronger source arrives — `ae add`
+  over an inline-learned row upgrades it to yours, casing included. Siblings
+  already in your dictionary stay; remove the one you don't want with
+  `ae rm ACR <exact expansion>`.
 - `rm`'s JSON status now always carries `backup` (a path, or `null`), and
   `acronym` is `null` for a removal spanning every acronym.
 

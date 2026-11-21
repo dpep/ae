@@ -878,3 +878,11 @@ fn rm_unverified_conflicts_with_picking_an_expansion() {
     assert!(!run(&sock, &["rm", "ZQ", "Zebra", "--unverified"], None).success);
     assert!(!run(&sock, &["rm", "ZQ", "--all", "--unverified"], None).success);
 }
+
+#[test]
+fn add_folds_an_expansion_differing_only_in_case() {
+    let sock = scratch_socket("addcase");
+    run(&sock, &["add", "BK", "buildkite"], None);
+    run(&sock, &["add", "BK", "Buildkite"], None);
+    assert_eq!(shown(&sock, "BK").len(), 1);
+}

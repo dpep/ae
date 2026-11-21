@@ -181,37 +181,50 @@ impl Store {
     }
 
     /// Insert an `(acronym, expansion)` pair from `source` (`"user"`, `"inline"`,
-    /// or `"mined"`), returning its row id. Idempotent; a re-add only *upgrades*
-    /// the source if the new one is stronger (mined < inline < user). Defining a
+    /// or `"mined"`), returning its row id. Expansions differing only in case
+    /// are the same row. Idempotent; a re-add only *upgrades* the source if the
+    /// new one is stronger (mined < inline < user), and then its casing wins
+    /// too — so `ae add` can correct a learned row's casing. Defining a
     /// confirmed expansion also un-mutes the acronym — an explicit definition
     /// reactivates one that had been ignored.
     pub fn add_entry(&self, acronym: &str, expansion: &str, source: &str) -> Result<i64> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim();
-        self.conn.execute(
-            "INSERT OR IGNORE INTO acronym_dictionary (acronym, expansion, source) VALUES (?1, ?2, ?3)",
-            params![acronym, expansion, source],
-        )?;
-        let current: String = self.conn.query_row(
-            "SELECT source FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
-            params![acronym, expansion],
-            |row| row.get(0),
-        )?;
-        if source_rank(source) > source_rank(&current) {
-            self.conn.execute(
-                "UPDATE acronym_dictionary SET source = ?3 WHERE acronym = ?1 AND expansion = ?2",
-                params![acronym, expansion, source],
-            )?;
-        }
+        // NOCASE folds ASCII only. Exact casing first, for legacy case siblings
+        // (an exact hit also keeps the UPDATE below off the unique index).
+        let existing: Option<(i64, String)> = self
+            .conn
+            .query_row(
+                "SELECT id, source FROM acronym_dictionary
+                 WHERE acronym = ?1 AND expansion = ?2 COLLATE NOCASE
+                 ORDER BY expansion = ?2 DESC, id LIMIT 1",
+                params![acronym, expansion],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let id = match existing {
+            Some((id, current)) => {
+                if source_rank(source) > source_rank(&current) {
+                    self.conn.execute(
+                        "UPDATE acronym_dictionary SET source = ?2, expansion = ?3 WHERE id = ?1",
+                        params![id, source, expansion],
+                    )?;
+                }
+                id
+            }
+            None => {
+                self.conn.execute(
+                    "INSERT INTO acronym_dictionary (acronym, expansion, source) VALUES (?1, ?2, ?3)",
+                    params![acronym, expansion, source],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+        };
         // It's confirmed now, so it's no longer an open candidate / speculation,
         // nor muted — an explicit definition reactivates an ignored acronym.
         self.clear_candidate(&acronym)?;
         self.unignore_acronym(&acronym)?;
-        self.conn.query_row(
-            "SELECT id FROM acronym_dictionary WHERE acronym = ?1 AND expansion = ?2",
-            params![acronym, expansion],
-            |row| row.get(0),
-        )
+        Ok(id)
     }
 
     /// Record one sighting of an undefined acronym-shaped token, bumping its
@@ -1477,6 +1490,65 @@ mod tests {
         s.add_context(id, &v).unwrap();
         let back = s.contexts_for(id).unwrap();
         assert_eq!(back, vec![v]);
+    }
+
+    /// `(expansion, source)` rows of `acronym`, confirmed and mined alike.
+    fn rows_of(s: &Store, acronym: &str) -> Vec<(String, String)> {
+        let mut stmt = s
+            .conn
+            .prepare(
+                "SELECT expansion, source FROM acronym_dictionary WHERE acronym = ?1 ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map(params![acronym], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn add_treats_expansions_differing_only_in_case_as_one_row() {
+        let row = |e: &str, src: &str| vec![(e.to_string(), src.to_string())];
+
+        // Same strength: the existing row (and its casing) stands.
+        let s = Store::open_in_memory().unwrap();
+        let id = s.add_entry("BK", "Buildkite", "inline").unwrap();
+        assert_eq!(s.add_entry("BK", "buildkite", "inline").unwrap(), id);
+        assert_eq!(rows_of(&s, "BK"), row("Buildkite", "inline"));
+
+        // A stronger source upgrades the row and brings its casing with it.
+        assert_eq!(s.add_entry("BK", "BuildKite", "user").unwrap(), id);
+        assert_eq!(rows_of(&s, "BK"), row("BuildKite", "user"));
+
+        // A weaker source never rewrites a user row.
+        s.add_entry("BK", "buildkite", "inline").unwrap();
+        assert_eq!(rows_of(&s, "BK"), row("BuildKite", "user"));
+
+        // A mined (lowercased) row is confirmed in place, not duplicated.
+        let s = Store::open_in_memory().unwrap();
+        s.record_potential("WQ", "widget quorum", 1.0).unwrap();
+        s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
+        assert_eq!(rows_of(&s, "WQ"), row("Widget Quorum", "inline"));
+    }
+
+    #[test]
+    fn add_prefers_the_exact_casing_among_legacy_case_siblings() {
+        let s = Store::open_in_memory().unwrap();
+        // Case-only siblings written before add folded case.
+        s.conn
+            .execute_batch(
+                "INSERT INTO acronym_dictionary (acronym, expansion, source)
+                 VALUES ('BK', 'Buildkite', 'inline'), ('BK', 'buildkite', 'inline');",
+            )
+            .unwrap();
+        s.add_entry("BK", "buildkite", "user").unwrap();
+        assert_eq!(
+            rows_of(&s, "BK"),
+            vec![
+                ("Buildkite".to_string(), "inline".to_string()),
+                ("buildkite".to_string(), "user".to_string()),
+            ]
+        );
     }
 
     #[test]
