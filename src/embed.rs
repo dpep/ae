@@ -7,21 +7,20 @@
 //! can't be loaded (offline + uncached, missing asset) and in unit tests that
 //! need reproducibility.
 //!
-//! Both yield a native-width vector that the MRL pipeline truncates to 64 dims;
-//! the trait deliberately does *not* fix the width, since the implementations
-//! happen to agree here ([`EMBED_DIMS`] = 384) but needn't. [`default_embedder`]
-//! picks the best available at runtime, so callers never branch on which one
-//! they got.
+//! Both yield a vector that the MRL pipeline truncates to 64 dims; the trait
+//! deliberately does *not* fix the width. The model's is 384, front-loaded so
+//! truncation keeps the signal; the hash fallback has no such ordering, so it
+//! emits exactly [`MRL_DIMS`] and truncation discards nothing.
+//! [`default_embedder`] picks the best available at runtime, so callers never
+//! branch on which one they got.
 
 mod onnx;
 
 pub use onnx::OnnxEmbedder;
 
-/// Native width of the [`HashEmbedder`] fallback. The MRL stage only needs at
-/// least [`crate::mrl::MRL_DIMS`] coordinates, so embedders may differ in width.
-pub const EMBED_DIMS: usize = 384;
+use crate::mrl::MRL_DIMS;
 
-/// Produces an embedding (length ≥ [`crate::mrl::MRL_DIMS`]) for a chunk of text.
+/// Produces an embedding (length ≥ [`MRL_DIMS`]) for a chunk of text.
 pub trait Embedder: Send + Sync {
     fn embed(&self, text: &str) -> Vec<f32>;
 
@@ -88,10 +87,12 @@ impl Embedder for HashEmbedder {
     }
 
     fn embed(&self, text: &str) -> Vec<f32> {
-        let mut v = vec![0.0f32; EMBED_DIMS];
+        // Hash straight into the MRL width: any coordinate past it would be
+        // truncated away, taking its tokens with it.
+        let mut v = vec![0.0f32; MRL_DIMS];
         for token in tokenize(text) {
             let h = fnv1a(token.as_bytes());
-            let idx = (h % EMBED_DIMS as u64) as usize;
+            let idx = (h % MRL_DIMS as u64) as usize;
             // A second hashed bit picks the sign, reducing collisions' bias.
             let sign = if (h >> 32) & 1 == 0 { 1.0 } else { -1.0 };
             v[idx] += sign;
@@ -105,8 +106,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedding_has_full_width() {
-        assert_eq!(HashEmbedder::new().embed("hello world").len(), EMBED_DIMS);
+    fn embedding_has_mrl_width() {
+        assert_eq!(HashEmbedder::new().embed("hello world").len(), MRL_DIMS);
     }
 
     #[test]
@@ -134,7 +135,30 @@ mod tests {
     }
 
     #[test]
+    fn shared_tokens_survive_mrl_compression() {
+        use crate::mrl::{compress_matryoshka_vector, cosine_similarity};
+        let e = HashEmbedder::new();
+        let fit = |a: &str, b: &str| {
+            cosine_similarity(
+                &compress_matryoshka_vector(&e.embed(a)),
+                &compress_matryoshka_vector(&e.embed(b)),
+            )
+        };
+        let pairs = [
+            ("physical therapy session", "physical therapy appointment"),
+            (
+                "key performance indicator",
+                "performance indicator dashboard",
+            ),
+        ];
+        for (a, b) in pairs {
+            let cos = fit(a, b);
+            assert!(cos > 0.3, "cos({a:?}, {b:?}) = {cos}");
+        }
+    }
+
+    #[test]
     fn empty_text_is_the_zero_vector() {
-        assert_eq!(HashEmbedder::new().embed(""), vec![0.0; EMBED_DIMS]);
+        assert_eq!(HashEmbedder::new().embed(""), vec![0.0; MRL_DIMS]);
     }
 }

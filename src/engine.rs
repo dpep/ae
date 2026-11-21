@@ -1441,7 +1441,7 @@ mod tests {
 
     impl Embedder for KeywordEmbedder {
         fn embed(&self, text: &str) -> Vec<f32> {
-            let mut v = vec![0.0; crate::embed::EMBED_DIMS];
+            let mut v = vec![0.0; crate::mrl::MRL_DIMS];
             for word in text
                 .split(|c: char| !c.is_alphanumeric())
                 .filter(|w| !w.is_empty())

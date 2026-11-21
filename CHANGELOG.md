@@ -49,6 +49,11 @@ releases are grouped at the end.
   `ae suggest` as speculation, and their acronym stays a candidate. Unaligned
   entries learned before this change remain in the dictionary as `inline`.
   `ae rm --unverified` clears them.
+- Without the embedding model (offline, not yet cached), context now counts:
+  the built-in fallback used to drop most words before comparing, so siblings
+  split confidence evenly whatever the prompt said. Nothing to do. Contexts
+  stored offline before this change still match, just more weakly, and fill
+  in as `ae` sees the acronym again.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
