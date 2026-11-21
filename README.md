@@ -130,9 +130,11 @@ learns; `ae add … -q` adds without printing).
 
 `rm --all` (no acronym) clears the entire dictionary and resets to the built-in
 defaults. It isn't gated by a prompt — instead it first writes a timestamped
-snapshot to `/tmp/ae/backup_<ts>.db`, and `ae rm --restore [PATH]` brings it back
-(with no path, the most recent backup; the pre-restore state is itself snapshotted,
-so a restore is reversible).
+snapshot beside the database, in `backups/<db name>-<ts>.db` (readable only by
+you; the newest 10 per database are kept), and `ae rm --restore [PATH]` brings it
+back (with no path, this database's most recent backup; the pre-restore state is
+itself snapshotted, so a restore is reversible). For the default dictionary
+that's `~/.local/share/ae/backups/`.
 
 `ignore` (alias `mute`) is for acronym-shaped tokens you never want surfaced or
 mined — e.g. an all-caps word a colleague keeps shouting. The entry stays in the
@@ -208,8 +210,8 @@ ae rm MVP --unverified  # removes every expansion you didn't add yourself
 `--unverified` keeps the `user` rows (the ones you added, plus the built-in
 defaults) and drops the rest: expansions learned from inline definitions and
 speculative mined ones. Without an acronym it cleans every acronym at once —
-the way to rescue a polluted dictionary — and, like `rm --all`, snapshots to
-`/tmp/ae` first so `ae rm --restore` undoes it.
+the way to rescue a polluted dictionary — and, like `rm --all`, snapshots it
+first so `ae rm --restore` undoes it (no snapshot when there's nothing to remove).
 
 An exact expansion always wins over a substring, so `ae rm PP "Partner
 Platform"` removes that one even when "Agent and Partner Platform" also exists.

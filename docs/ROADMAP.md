@@ -128,8 +128,9 @@ commit.
 - [x] `ae rm --all` (no acronym) / `ae rm --restore [PATH]` — wipe the whole
       dictionary (factory reset: built-in defaults re-seed) and recover it.
       Instead of a confirmation prompt, the wipe first writes a timestamped
-      `VACUUM INTO` snapshot to `/tmp/ae/backup_<ts>.db`; `--restore` swaps it
-      back (most recent if no path), snapshotting the current state first so it's
+      `VACUUM INTO` snapshot to `<db dir>/backups/<db stem>-<ts>.db` (0600,
+      newest 10 kept); `--restore` swaps it back (this DB's most recent if no
+      path), snapshotting the current state first so it's
       reversible
 - [x] `ae ignore <ACR>` (alias `mute`) / `ae unignore <ACR>` — mute an acronym
       without deleting it: kept in the DB (`ignored_acronyms` table) but inert,

@@ -989,3 +989,68 @@ fn stats_on_a_fresh_dictionary_has_no_aligned_share() {
     assert_eq!(v["verified_share"], 1.0);
     assert!(v["aligned_share"].is_null());
 }
+
+// --- cleanup safety: per-database backups, case folding, prune to current rules ---
+
+/// This test DB's backups: `<db dir>/backups/<db stem>-*.db`.
+fn backups_of(sock: &std::path::Path) -> Vec<PathBuf> {
+    let db = sock.with_extension("db");
+    let stem = db.file_stem().unwrap().to_str().unwrap().to_string();
+    let Ok(dir) = std::fs::read_dir(db.parent().unwrap().join("backups")) else {
+        return Vec::new();
+    };
+    dir.filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&format!("{stem}-")))
+        })
+        .collect()
+}
+
+#[test]
+fn a_bare_restore_never_picks_another_databases_backup() {
+    let a = scratch_socket("restoremine-a");
+    let b = scratch_socket("restoremine-b");
+    run(&a, &[], Some("The ZQ (Zebra Queue) is deep."));
+    run(&b, &[], Some("The WQ (Widget Quorum) met."));
+
+    assert!(run(&a, &["rm", "--unverified"], None).success);
+    assert!(run(&b, &["rm", "--unverified"], None).success); // newer, other DB
+    let out = run(&a, &["rm", "--restore", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+
+    assert_eq!(shown(&a, "ZQ"), vec!["Zebra Queue"]);
+    assert!(shown(&a, "WQ").is_empty(), "restored B's contents into A");
+}
+
+#[test]
+fn backups_live_beside_the_database_and_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let sock = scratch_socket("backupbeside");
+    run(&sock, &[], Some("The ZQ (Zebra Queue) is deep."));
+    let out = run(&sock, &["rm", "--unverified", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let backup = PathBuf::from(v["backup"].as_str().expect("a backup path"));
+
+    assert_eq!(backups_of(&sock), vec![backup.clone()]);
+    let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "backup is readable by others");
+}
+
+#[test]
+fn a_bulk_remove_with_nothing_to_remove_takes_no_backup() {
+    let sock = scratch_socket("backupnoop");
+    let out = run(&sock, &["rm", "--unverified", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["removed"], 0);
+    assert!(v["backup"].is_null());
+    assert!(backups_of(&sock).is_empty());
+}
+
+#[test]
+fn a_bare_restore_with_no_backups_for_this_database_fails() {
+    let sock = scratch_socket("restorenone");
+    assert!(!run(&sock, &["rm", "--restore"], None).success);
+}

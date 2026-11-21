@@ -921,6 +921,16 @@ impl Store {
         })
     }
 
+    /// How many rows [`Self::delete_unverified`] would remove across every
+    /// acronym — so a no-op bulk remove can skip its backup.
+    pub fn unverified_count(&self) -> Result<usize> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM acronym_dictionary WHERE source != 'user'",
+            [],
+            |row| row.get(0),
+        )
+    }
+
     /// Dictionary health — see [`DictionaryStats`].
     pub fn stats(&self) -> Result<DictionaryStats> {
         let mut stmt = self.conn.prepare(

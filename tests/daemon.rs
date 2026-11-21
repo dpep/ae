@@ -23,6 +23,14 @@ fn cleanup(socket: &Path) {
     for ext in ["sock", "db", "db-wal", "db-shm", "lock", "log"] {
         let _ = std::fs::remove_file(socket.with_extension(ext));
     }
+    // `rm` backs up into `<db dir>/backups/<db stem>-<ts>.db`.
+    let stem = format!("{}-", socket.file_stem().unwrap().to_string_lossy());
+    let backups = socket.with_file_name("backups");
+    for entry in std::fs::read_dir(backups).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&stem) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Run an `ae` subcommand to completion, returning (success, stdout).

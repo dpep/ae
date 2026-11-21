@@ -185,8 +185,9 @@ pub enum Command {
     /// otherwise name one (exact, then ignoring case, then substring), or
     /// `--all` to remove every one. `--unverified` keeps only the expansions
     /// you added. With no acronym, `--all` wipes the whole dictionary and
-    /// `--unverified` strips every acronym (a timestamped backup is saved under
-    /// /tmp/ae first); `rm --restore [PATH]` brings it back.
+    /// `--unverified` strips every acronym (a timestamped backup is saved first,
+    /// in a `backups/` directory beside the database, keeping the newest 10);
+    /// `rm --restore [PATH]` brings it back.
     #[command(visible_alias = "delete")]
     Rm {
         acronym: Option<String>,
@@ -204,8 +205,8 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["all", "expansion"])]
         unverified: bool,
         /// Restore the dictionary from a backup made by `--all` or `--unverified`
-        /// (the most recent one if no path is given). The current state is
-        /// backed up first, so a restore is reversible.
+        /// (this database's most recent one if no path is given). The current
+        /// state is backed up first, so a restore is reversible.
         #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with_all = ["all", "unverified", "acronym", "expansion"])]
         restore: Option<Option<PathBuf>>,
     },
@@ -609,22 +610,26 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             unverified,
             restore,
         } => {
+            let db = cli.db_path();
             // `--restore` overwrites the DB file, so it takes ownership of
             // `store` to close the connection first.
-            if let Some(path) = restore {
-                return run_restore(store, cli, fmt, quiet, path.as_deref());
-            }
-            if *unverified {
-                return run_rm_unverified(&store, fmt, quiet, acronym.as_deref());
-            }
-            run_rm(
-                &store,
-                fmt,
-                quiet,
-                acronym.as_deref(),
-                expansion.as_deref(),
-                *all,
-            )
+            let code = if let Some(path) = restore {
+                run_restore(store, cli, fmt, quiet, path.as_deref())
+            } else if *unverified {
+                run_rm_unverified(&store, &db, fmt, quiet, acronym.as_deref())
+            } else {
+                run_rm(
+                    &store,
+                    &db,
+                    fmt,
+                    quiet,
+                    acronym.as_deref(),
+                    expansion.as_deref(),
+                    *all,
+                )
+            };
+            rotate_backups(&db);
+            code
         }
         Command::Ignore { acronym } => run_ignore(&store, fmt, quiet, acronym.as_deref()),
         Command::Unignore { acronym } => run_unignore(&store, fmt, quiet, acronym),
@@ -960,6 +965,7 @@ fn pick_numbered(acronym: &str, suggestions: &[(String, f32)]) -> Option<Vec<Str
 /// With no acronym, `--all` wipes the whole dictionary (after a backup).
 fn run_rm(
     store: &crate::store::Store,
+    db: &Path,
     fmt: Format,
     quiet: bool,
     acronym: Option<&str>,
@@ -969,7 +975,7 @@ fn run_rm(
     let acronym = match acronym {
         Some(a) => a,
         // No acronym: `--all` is the whole-dictionary wipe; otherwise nothing to do.
-        None if all => return run_wipe_all(store, fmt, quiet),
+        None if all => return run_wipe_all(store, db, fmt, quiet),
         None => {
             return fail(
                 fmt,
@@ -1030,18 +1036,24 @@ fn run_rm(
 }
 
 /// `rm [ACR] --unverified`: drop the expansions no person asserted. Across
-/// every acronym it's a bulk edit like `rm --all`, so it snapshots first.
+/// every acronym it's a bulk edit like `rm --all`, so it snapshots first —
+/// unless there's nothing to remove.
 fn run_rm_unverified(
     store: &crate::store::Store,
+    db: &Path,
     fmt: Format,
     quiet: bool,
     acronym: Option<&str>,
 ) -> ExitCode {
     let backup = match acronym {
         Some(_) => None,
-        None => match snapshot(store) {
-            Ok(p) => Some(p),
-            Err(e) => return fail(fmt, &format!("backup failed: {e}")),
+        None => match store.unverified_count() {
+            Ok(0) => None,
+            Ok(_) => match snapshot(store, db) {
+                Ok(p) => Some(p),
+                Err(e) => return fail(fmt, &format!("backup failed: {e}")),
+            },
+            Err(e) => return fail(fmt, &format!("dictionary error: {e}")),
         },
     };
     match store.delete_unverified(acronym) {
@@ -1077,10 +1089,10 @@ fn select_expansions<'a>(expansions: &'a [String], pattern: &str) -> Vec<&'a Str
 }
 
 /// Wipe the whole dictionary (`rm --all`, no acronym). A timestamped backup is
-/// saved under /tmp/ae first so the wipe is recoverable via `rm --restore`; the
+/// saved beside the DB first so the wipe is recoverable via `rm --restore`; the
 /// built-in defaults re-seed on the next open (a factory reset).
-fn run_wipe_all(store: &crate::store::Store, fmt: Format, quiet: bool) -> ExitCode {
-    let backup = match snapshot(store) {
+fn run_wipe_all(store: &crate::store::Store, db: &Path, fmt: Format, quiet: bool) -> ExitCode {
+    let backup = match snapshot(store, db) {
         Ok(p) => p,
         Err(e) => return fail(fmt, &format!("backup failed: {e}")),
     };
@@ -1121,12 +1133,16 @@ fn run_restore(
     let db = cli.db_path();
     let src = match backup {
         Some(p) => p.to_path_buf(),
-        None => match latest_backup() {
+        None => match backups_of(&db).pop() {
             Some(p) => p,
             None => {
                 return fail(
                     fmt,
-                    &format!("no backups found in {}", backup_dir().display()),
+                    &format!(
+                        "no backups of {} in {}",
+                        db.display(),
+                        backup_dir(&db).display()
+                    ),
                 );
             }
         },
@@ -1135,7 +1151,7 @@ fn run_restore(
         return fail(fmt, &format!("backup not found: {}", src.display()));
     }
     // Snapshot the current state first, so the restore can be undone.
-    let prior = match snapshot(&store) {
+    let prior = match snapshot(&store, &db) {
         Ok(p) => p,
         Err(e) => return fail(fmt, &format!("backup failed: {e}")),
     };
@@ -1181,42 +1197,88 @@ fn run_restore(
     ExitCode::SUCCESS
 }
 
-/// Directory holding `rm --all` / `rm --restore` backups, alongside the default
-/// socket under /tmp, so snapshots don't clutter the working tree.
-fn backup_dir() -> PathBuf {
-    PathBuf::from("/tmp/ae")
+/// Backups kept per database; `rm` deletes older ones after taking a new one.
+/// They're full copies, and they no longer vanish on reboot.
+const BACKUPS_KEPT: usize = 10;
+
+/// Where `db`'s backups live: `<db dir>/backups`, beside the data they protect.
+/// Not a shared /tmp directory, where every database (and the test suite)
+/// mixed its backups and a bare `--restore` could pick another's.
+fn backup_dir(db: &Path) -> PathBuf {
+    db.parent().unwrap_or(Path::new("")).join("backups")
 }
 
-/// Write a timestamped snapshot of the database's current contents to
-/// `/tmp/ae/backup_<ts>.db`. Returns the backup path.
-fn snapshot(store: &crate::store::Store) -> rusqlite::Result<PathBuf> {
-    let dir = backup_dir();
-    let _ = std::fs::create_dir_all(&dir);
+fn db_stem(db: &Path) -> String {
+    db.file_stem()
+        .map_or_else(|| "acronyms".into(), |s| s.to_string_lossy().into_owned())
+}
+
+/// The `(secs, nanos)` stamp of `stem`'s backup named `<stem>-<secs>-<nanos>.db`,
+/// or `None` if `name` isn't one — including another database's whose stem
+/// merely starts with `stem` (`acronyms-old-…` is not `acronyms`').
+fn backup_stamp(name: &str, stem: &str) -> Option<(u64, u32)> {
+    let rest = name
+        .strip_prefix(stem)?
+        .strip_prefix('-')?
+        .strip_suffix(".db")?;
+    let (secs, nanos) = rest.split_once('-')?;
+    Some((secs.parse().ok()?, nanos.parse().ok()?))
+}
+
+/// `db`'s backups, oldest first.
+fn backups_of(db: &Path) -> Vec<PathBuf> {
+    let stem = db_stem(db);
+    let Ok(dir) = std::fs::read_dir(backup_dir(db)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<((u64, u32), PathBuf)> = dir
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter_map(|p| Some((backup_stamp(p.file_name()?.to_str()?, &stem)?, p)))
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Write a private, timestamped snapshot of the database to
+/// `<db dir>/backups/<db stem>-<secs>-<nanos>.db`. Returns its path.
+fn snapshot(store: &crate::store::Store, db: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let dir = backup_dir(db);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     // Sub-second component keeps concurrent snapshots from colliding.
     let path = dir.join(format!(
-        "backup_{}-{:09}.db",
+        "{}-{}-{:09}.db",
+        db_stem(db),
         now.as_secs(),
         now.subsec_nanos()
     ));
-    store.backup_to(&path)?;
+    // Created empty and 0600 first (VACUUM INTO fills an empty file), so the
+    // copy is never readable by others, even briefly.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    if let Err(e) = store.backup_to(&path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(io::Error::other(e));
+    }
     Ok(path)
 }
 
-/// The most recent backup (by modified time), or `None` if there are none —
-/// used by `rm --restore` with no explicit path.
-fn latest_backup() -> Option<PathBuf> {
-    std::fs::read_dir(backup_dir())
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("backup_") && n.ends_with(".db"))
-        })
-        .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+/// Delete all but `db`'s newest [`BACKUPS_KEPT`] backups. Run once an `rm`
+/// has finished, so a restore never deletes the backup it is about to read.
+fn rotate_backups(db: &Path) {
+    let all = backups_of(db);
+    for old in &all[..all.len().saturating_sub(BACKUPS_KEPT)] {
+        let _ = std::fs::remove_file(old);
+    }
 }
 
 /// Report a removal. `acronym` is `None` for one spanning every acronym;
@@ -1367,6 +1429,23 @@ mod tests {
                 .map(String::as_str)
                 .collect();
             assert_eq!(got, *want, "pattern {pat:?} over {variants:?}");
+        }
+    }
+
+    #[test]
+    fn a_backup_belongs_only_to_the_database_it_was_named_for() {
+        let cases = [
+            ("acronyms-17-000000005.db", "acronyms", Some((17, 5))),
+            // Another database whose stem extends this one's.
+            ("acronyms-old-17-000000005.db", "acronyms", None),
+            ("work-1-17-000000005.db", "work", None),
+            ("work-1-17-000000005.db", "work-1", Some((17, 5))),
+            // The pre-0.8 global naming, and strays.
+            ("backup_17-000000005.db", "acronyms", None),
+            ("acronyms-17-000000005.db-wal", "acronyms", None),
+        ];
+        for (name, stem, want) in cases {
+            assert_eq!(backup_stamp(name, stem), want, "{name} for {stem}");
         }
     }
 }
