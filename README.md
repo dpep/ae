@@ -231,9 +231,12 @@ only one; otherwise the substring rule applies.
 tokens it couldn't resolve and counts how often you've used them, so you can see
 what's worth defining. (Defining one clears it from the list.) Tokens that are
 just ordinary words in caps (`WHERE`, `POST`, per the system wordlist, when one
-is installed) and numbered labels (`V1`, `Q1`, `FY27`) aren't counted; a real
-acronym that is also a word (`SLA`, `CAT`) still expands once you `add` it, and
-a bare `add` (no expansion) still mines it. All of these honor `-j`/`-J` too.
+is installed — and their inflections, `FAILED`, `VALUES`) and numbered labels
+(`V1`, `Q1`, `FY27`) aren't counted. A handful of common acronyms whose word
+sense is obscure (`AI`, `IDE`, `ISO`, `ROI`, `ETA`, `SLA`) are still counted. Any
+other real acronym that is also a word (`REST`, `CAT`) still expands once you
+`add` it, and a bare `add` (no expansion) still mines it. All of these honor
+`-j`/`-J` too.
 
 Default output is human-readable; `-j`/`-J` switch to JSON/NDJSON. A positional
 `TEXT` is analyzed as one blob; piped stdin and `--file` are streamed line by

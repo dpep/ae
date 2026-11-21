@@ -11,8 +11,8 @@ releases are grouped at the end.
 - Candidates skip tokens that aren't acronyms: an ordinary word in caps
   (`WHERE`, `NOT`, `POST`, `WARN` — checked against the system wordlist, when
   one is installed), a numbered label (`V1`, `L4`, `Q1`, `H1`, `P0`, `FY27`),
-  and `INFO`/`DEBUG`/`TODO`/`FIXME`. A real acronym that is also a word (`SLA`,
-  `ETA`, `CAT`) is no longer surfaced as a candidate; define it with `ae add`,
+  and `INFO`/`DEBUG`/`TODO`/`FIXME`. A real acronym that is also a word (`REST`,
+  `CAT`) is no longer surfaced as a candidate; define it with `ae add`,
   or `ae add` it with no expansion to keep mining for one. Junk candidates
   already recorded are cleared by `ae prune` (below).
 - `ae rm ACR <expansion>` prefers an exact match: `ae rm PP "Partner Platform"`
@@ -80,6 +80,12 @@ releases are grouped at the end.
   losing the inline definitions that are right. It backs up first when it
   changes any entries. Its JSON gains `unaligned_removed`,
   `case_duplicates_merged` and `backup`. The automatic pass doesn't do this.
+- The candidate word rule also catches inflections the system wordlist lacks
+  (`FAILED`, `VALUES`, `MOVED`, `FIELDS`), keeping acronyms like `AWS`, `CORS`
+  and `SAAS` whose stripped form would be a short word. `AI`, `IDE`, `ISO`,
+  `ROI`, `ETA` and `SLA` are exempt and stay candidates: their word senses are
+  too obscure to be what caps text means. `ae prune` clears the inflected words
+  already on your candidate list.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

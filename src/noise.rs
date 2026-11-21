@@ -9,9 +9,34 @@ use std::collections::HashSet;
 /// still expands. `words` is [`crate::spell::system_short_words`], not the full
 /// list, whose lowercased proper nouns would make `ADA` a word.
 pub fn is_noise(token: &str, words: Option<&HashSet<String>>) -> bool {
-    is_numbered_label(token)
-        || NOISE_TOKENS.contains(&token)
-        || words.is_some_and(|w| w.contains(&token.to_lowercase()))
+    !COMMON_ACRONYMS.contains(&token)
+        && (is_numbered_label(token)
+            || NOISE_TOKENS.contains(&token)
+            || words.is_some_and(|w| is_word(&token.to_lowercase(), w)))
+}
+
+/// Real acronyms whose dictionary sense is too obscure to be what someone
+/// shouting means — a sloth, a fish, a Greek letter. Not `IT`: "it" is
+/// everyday English. Keep this short; `ae add` declares anything else.
+const COMMON_ACRONYMS: &[&str] = &["AI", "IDE", "ISO", "ROI", "ETA", "SLA"];
+
+/// `lower` is in the wordlist, or inflects a word in it: the list has base
+/// forms only, so `failed` and `values` need `fail` and `value`. The stem must
+/// keep four letters — `aws`/`cors`/`saas` would otherwise strip to the words
+/// `aw`/`cor`/`saa`. (`-ing` and doubled consonants can't leave four letters
+/// within the six-letter acronym shape, so they aren't stripped.)
+fn is_word(lower: &str, words: &HashSet<String>) -> bool {
+    const MIN_STEM: usize = 4;
+    words.contains(lower)
+        || ["s", "es", "ed"].iter().any(|suffix| {
+            lower
+                .strip_suffix(suffix)
+                .is_some_and(|stem| stem.len() >= MIN_STEM && words.contains(stem))
+        })
+        // moved → move
+        || lower
+            .strip_suffix('d')
+            .is_some_and(|stem| stem.ends_with('e') && stem.len() >= MIN_STEM && words.contains(stem))
 }
 
 /// Shouted words the system wordlist lacks (it predates them) — log
@@ -70,5 +95,32 @@ mod tests {
         for token in ["INFO", "DEBUG", "TODO", "FIXME"] {
             assert!(is_noise(token, None), "{token} should be noise");
         }
+    }
+
+    #[test]
+    fn an_inflected_word_is_noise_though_the_wordlist_has_only_its_base() {
+        let words = word_set(&["fail", "value", "move", "merge", "pass"]);
+        for token in ["FAILED", "VALUES", "MOVED", "MERGES", "PASSES"] {
+            assert!(is_noise(token, Some(&words)), "{token} should be noise");
+        }
+    }
+
+    #[test]
+    fn an_acronym_ending_in_s_survives_a_short_stem_that_is_a_word() {
+        // aw, cor, saa, io, ad are all in the system wordlist.
+        let words = word_set(&["aw", "cor", "saa", "io", "ad", "kpi"]);
+        for token in ["AWS", "CORS", "SAAS", "IOS", "ADS"] {
+            assert!(!is_noise(token, Some(&words)), "{token} is a real acronym");
+        }
+    }
+
+    #[test]
+    fn common_acronyms_with_obscure_word_senses_stay_candidates() {
+        let words = word_set(&["ai", "ide", "roi", "iso", "eta", "sla", "it"]);
+        for token in ["AI", "IDE", "ROI", "ISO", "ETA", "SLA"] {
+            assert!(!is_noise(token, Some(&words)), "{token} is a real acronym");
+        }
+        // "it" is everyday English; shouted text would flood the list with it.
+        assert!(is_noise("IT", Some(&words)));
     }
 }
