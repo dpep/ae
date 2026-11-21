@@ -102,6 +102,7 @@ ae ignore IOS                         # mute: keep it but make it inert (unignor
 ae ignore                             # list muted acronyms
 ae rm MVP                             # delete it outright (ignore mutes; rm removes)
 ae rm --all                           # wipe the whole dictionary (backed up first)
+ae rm --unverified                    # keep only what you added yourself (backed up first)
 ae rm --restore                       # restore the most recent backup (or pass a path)
 ```
 
@@ -180,7 +181,14 @@ Removal disambiguates when an acronym has several expansions:
 ae rm MVP            # removes it if there's one expansion; else lists them and stops
 ae rm MVP valuable  # substring picks one ("Most Valuable Player")
 ae rm MVP --all     # removes every expansion
+ae rm MVP --unverified  # removes every expansion you didn't add yourself
 ```
+
+`--unverified` keeps the `user` rows (the ones you added, plus the built-in
+defaults) and drops the rest: expansions learned from inline definitions and
+speculative mined ones. Without an acronym it cleans every acronym at once —
+the way to rescue a polluted dictionary — and, like `rm --all`, snapshots to
+`/tmp/ae` first so `ae rm --restore` undoes it.
 
 An exact expansion always wins over a substring, so `ae rm PP "Partner
 Platform"` removes that one even when "Agent and Partner Platform" also exists.

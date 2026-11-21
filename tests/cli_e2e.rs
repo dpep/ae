@@ -818,3 +818,63 @@ fn rm_exact_expansion_beats_a_substring_sibling() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["expansion"], "Agent and Partner Platform");
 }
+
+/// Expansions of `acronym` currently shown by `ae show`.
+fn shown(sock: &std::path::Path, acronym: &str) -> Vec<String> {
+    let out = run(sock, &["show", acronym, "-j"], None);
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out.stdout).unwrap();
+    rows.iter()
+        .map(|r| r["expansion"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn rm_unverified_keeps_user_rows_of_one_acronym() {
+    let sock = scratch_socket("rmunverified");
+    run(&sock, &[], Some("The ZQ (Zebra Queue) is deep.")); // learned inline
+    run(&sock, &["add", "ZQ", "Zone Quota"], None);
+    run(&sock, &[], Some("The WQ (Widget Quorum) met.")); // another acronym
+
+    let out = run(&sock, &["rm", "ZQ", "--unverified", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["status"], "removed");
+    assert_eq!(v["acronym"], "ZQ");
+    assert_eq!(v["removed"], 1);
+    assert!(v["backup"].is_null());
+
+    assert_eq!(shown(&sock, "ZQ"), vec!["Zone Quota"]);
+    assert_eq!(shown(&sock, "WQ"), vec!["Widget Quorum"]); // untouched
+}
+
+#[test]
+fn rm_unverified_without_an_acronym_cleans_everything_with_a_backup() {
+    let sock = scratch_socket("rmunverifiedall");
+    run(&sock, &[], Some("The ZQ (Zebra Queue) is deep."));
+    run(&sock, &[], Some("The WQ (Widget Quorum) met."));
+    run(&sock, &["add", "ZQ", "Zone Quota"], None);
+
+    let out = run(&sock, &["rm", "--unverified", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(v["status"], "removed");
+    assert!(v["acronym"].is_null());
+    assert_eq!(v["removed"], 2);
+    let backup = v["backup"].as_str().expect("a backup path");
+    assert!(std::path::Path::new(backup).is_file());
+
+    assert_eq!(shown(&sock, "ZQ"), vec!["Zone Quota"]);
+    assert!(shown(&sock, "WQ").is_empty());
+    assert!(!shown(&sock, "KPI").is_empty()); // built-in defaults are user rows
+
+    // The backup brings the inline rows back.
+    assert!(run(&sock, &["rm", "--restore", backup], None).success);
+    assert_eq!(shown(&sock, "WQ"), vec!["Widget Quorum"]);
+}
+
+#[test]
+fn rm_unverified_conflicts_with_picking_an_expansion() {
+    let sock = scratch_socket("rmunverifiedconflict");
+    assert!(!run(&sock, &["rm", "ZQ", "Zebra", "--unverified"], None).success);
+    assert!(!run(&sock, &["rm", "ZQ", "--all", "--unverified"], None).success);
+}

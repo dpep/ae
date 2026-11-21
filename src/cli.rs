@@ -179,9 +179,11 @@ pub enum Command {
         min_confidence: Option<f32>,
     },
     /// Remove an acronym. Bare `rm ACR` removes it when there's one expansion;
-    /// otherwise pass a substring to pick one, or `--all` to remove every one.
-    /// `rm --all` with no acronym wipes the whole dictionary (a timestamped
-    /// backup is saved under /tmp/ae first); `rm --restore [PATH]` brings it back.
+    /// otherwise name one (exact, then ignoring case, then substring), or
+    /// `--all` to remove every one. `--unverified` keeps only the expansions
+    /// you added. With no acronym, `--all` wipes the whole dictionary and
+    /// `--unverified` strips every acronym (a timestamped backup is saved under
+    /// /tmp/ae first); `rm --restore [PATH]` brings it back.
     #[command(visible_alias = "delete")]
     Rm {
         acronym: Option<String>,
@@ -192,10 +194,16 @@ pub enum Command {
         /// the entire dictionary (backed up first).
         #[arg(short, long)]
         all: bool,
-        /// Restore the dictionary from a backup made by `--all` (the most recent
-        /// one if no path is given). The current state is backed up first, so a
-        /// restore is reversible.
-        #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with_all = ["all", "acronym", "expansion"])]
+        /// Remove every expansion you didn't add yourself — those learned from
+        /// inline definitions and speculative mined ones — keeping `user` rows.
+        /// With an acronym: just that acronym. With none: every acronym (backed
+        /// up first, like `--all`).
+        #[arg(long, conflicts_with_all = ["all", "expansion"])]
+        unverified: bool,
+        /// Restore the dictionary from a backup made by `--all` or `--unverified`
+        /// (the most recent one if no path is given). The current state is
+        /// backed up first, so a restore is reversible.
+        #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with_all = ["all", "unverified", "acronym", "expansion"])]
         restore: Option<Option<PathBuf>>,
     },
     /// Mute an acronym: keep it (and any expansions) in the dictionary but make
@@ -583,12 +591,16 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             acronym,
             expansion,
             all,
+            unverified,
             restore,
         } => {
             // `--restore` overwrites the DB file, so it takes ownership of
             // `store` to close the connection first.
             if let Some(path) = restore {
                 return run_restore(store, cli, fmt, quiet, path.as_deref());
+            }
+            if *unverified {
+                return run_rm_unverified(&store, fmt, quiet, acronym.as_deref());
             }
             run_rm(
                 &store,
@@ -942,7 +954,7 @@ fn run_rm(
     };
     let acronym = acronym.to_uppercase();
     if variants.is_empty() {
-        return removed_status(fmt, quiet, &acronym, 0);
+        return removed_status(fmt, quiet, Some(&acronym), 0, None);
     }
 
     let all_exps: Vec<String> = variants.iter().map(|(_, e, _)| e.clone()).collect();
@@ -985,7 +997,31 @@ fn run_rm(
             Err(e) => return fail(fmt, &format!("delete failed: {e}")),
         }
     }
-    removed_status(fmt, quiet, &acronym, removed)
+    removed_status(fmt, quiet, Some(&acronym), removed, None)
+}
+
+/// `rm [ACR] --unverified`: drop the expansions no person asserted. Across
+/// every acronym it's a bulk edit like `rm --all`, so it snapshots first.
+fn run_rm_unverified(
+    store: &crate::store::Store,
+    fmt: Format,
+    quiet: bool,
+    acronym: Option<&str>,
+) -> ExitCode {
+    let backup = match acronym {
+        Some(_) => None,
+        None => match snapshot(store) {
+            Ok(p) => Some(p),
+            Err(e) => return fail(fmt, &format!("backup failed: {e}")),
+        },
+    };
+    match store.delete_unverified(acronym) {
+        Ok(n) => {
+            let acronym = acronym.map(|a| a.trim().to_uppercase());
+            removed_status(fmt, quiet, acronym.as_deref(), n, backup.as_deref())
+        }
+        Err(e) => fail(fmt, &format!("delete failed: {e}")),
+    }
 }
 
 /// The expansions `rm ACR <pattern>` names: an exact match, else the one
@@ -1154,16 +1190,37 @@ fn latest_backup() -> Option<PathBuf> {
         .max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
-fn removed_status(fmt: Format, quiet: bool, acronym: &str, n: usize) -> ExitCode {
+/// Report a removal. `acronym` is `None` for one spanning every acronym;
+/// `backup` is the snapshot taken first, if any. JSON always carries all four
+/// keys (`null` when absent) so consumers needn't probe for them.
+fn removed_status(
+    fmt: Format,
+    quiet: bool,
+    acronym: Option<&str>,
+    n: usize,
+    backup: Option<&Path>,
+) -> ExitCode {
     if !quiet {
         match fmt {
             Format::Human => {
                 let noun = if n == 1 { "entry" } else { "entries" };
-                println!("ae: removed {n} {noun} for {acronym}");
+                let scope = match acronym {
+                    Some(a) => format!("for {a}"),
+                    None => "across all acronyms".to_string(),
+                };
+                let saved = backup
+                    .map(|p| format!(" — backup saved to {}", p.display()))
+                    .unwrap_or_default();
+                println!("ae: removed {n} {noun} {scope}{saved}");
             }
             _ => println!(
                 "{}",
-                serde_json::json!({"status": "removed", "acronym": acronym, "removed": n})
+                serde_json::json!({
+                    "status": "removed",
+                    "acronym": acronym,
+                    "removed": n,
+                    "backup": backup.map(|p| p.display().to_string()),
+                })
             ),
         }
     }

@@ -819,6 +819,26 @@ impl Store {
         Ok(n)
     }
 
+    /// Delete every expansion a person didn't assert — `inline` and `mined`
+    /// rows, keeping `user` ones — for one acronym, or all of them with `None`.
+    /// Returns the number of dictionary rows removed.
+    pub fn delete_unverified(&self, acronym: Option<&str>) -> Result<usize> {
+        let acronym = acronym.map(|a| a.trim().to_uppercase());
+        // `?1 IS NULL` makes the acronym filter optional in one statement.
+        let rows = "SELECT id FROM acronym_dictionary
+                    WHERE source != 'user' AND (?1 IS NULL OR acronym = ?1)";
+        self.in_transaction(|| {
+            self.conn.execute(
+                &format!("DELETE FROM acronym_contexts WHERE acronym_id IN ({rows})"),
+                params![acronym],
+            )?;
+            self.conn.execute(
+                &format!("DELETE FROM acronym_dictionary WHERE id IN ({rows})"),
+                params![acronym],
+            )
+        })
+    }
+
     /// Number of *confirmed* expansions — gates default seeding.
     pub fn count(&self) -> Result<i64> {
         self.conn.query_row(
@@ -1457,5 +1477,36 @@ mod tests {
         s.add_context(id, &v).unwrap();
         let back = s.contexts_for(id).unwrap();
         assert_eq!(back, vec![v]);
+    }
+
+    #[test]
+    fn delete_unverified_keeps_only_user_rows() {
+        let s = Store::open_in_memory().unwrap();
+        let v: Vec<f32> = vec![0.0; MRL_DIMS];
+        let kept = s.add_entry("ZQ", "Zone Quota", "user").unwrap();
+        let gone = s.add_entry("ZQ", "Zebra Queue", "inline").unwrap();
+        s.add_context(kept, &v).unwrap();
+        s.add_context(gone, &v).unwrap();
+        s.record_potential("ZQ", "zany quokka", 1.0).unwrap();
+        s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
+
+        // Scoped: inline and mined rows of ZQ go; ZQ's user row and WQ stay.
+        assert_eq!(s.delete_unverified(Some("zq")).unwrap(), 2);
+        let zq: Vec<String> = s
+            .expansions_for("ZQ")
+            .unwrap()
+            .into_iter()
+            .map(|r| r.1)
+            .collect();
+        assert_eq!(zq, vec!["Zone Quota".to_string()]);
+        assert!(s.potentials_for("ZQ").unwrap().is_empty());
+        assert_eq!(s.contexts_for(kept).unwrap().len(), 1);
+        assert!(s.contexts_for(gone).unwrap().is_empty());
+        assert_eq!(s.expansions_for("WQ").unwrap().len(), 1);
+
+        // Unscoped: every acronym.
+        assert_eq!(s.delete_unverified(None).unwrap(), 1);
+        assert!(s.expansions_for("WQ").unwrap().is_empty());
+        assert_eq!(s.expansions_for("ZQ").unwrap().len(), 1);
     }
 }

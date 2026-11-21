@@ -20,6 +20,14 @@ releases are grouped at the end.
   no longer refuses because "Agent and Partner Platform" also contains it, and
   `ae rm BK buildkite` picks that exact casing over "Buildkite". Failing an
   exact match, a unique match ignoring case is used, then the old substring rule.
+- `ae rm ACR --unverified` drops every expansion of ACR you didn't add yourself
+  (inline-learned and speculative mined rows), keeping `user` ones. With no
+  acronym it does that across the whole dictionary, backing up to `/tmp/ae`
+  first. If inline learning has filled your dictionary with junk, run
+  `ae rm --unverified` to keep only what you added (and the built-in defaults);
+  `ae rm --restore` undoes it.
+- `rm`'s JSON status now always carries `backup` (a path, or `null`), and
+  `acronym` is `null` for a removal spanning every acronym.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
