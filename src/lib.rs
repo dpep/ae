@@ -11,6 +11,7 @@ pub mod engine;
 pub mod ipc;
 pub mod learn;
 pub mod mrl;
+pub mod noise;
 pub mod output;
 pub mod spell;
 pub mod store;
