@@ -86,6 +86,9 @@ releases are grouped at the end.
   `ROI`, `ETA` and `SLA` are exempt and stay candidates: their word senses are
   too obscure to be what caps text means. `ae prune` clears the inflected words
   already on your candidate list.
+- Piping `ae` into a reader that stops early (`ae candidates | head`) exits
+  quietly with success instead of printing "render failed: Broken pipe" (or a
+  JSON error) and failing.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

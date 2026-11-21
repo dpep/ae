@@ -1090,3 +1090,52 @@ fn prune_brings_legacy_confirmed_rows_up_to_current_rules_with_a_backup() {
     let human = run(&sock, &["prune"], None);
     assert!(human.stdout.contains("unaligned"), "{}", human.stdout);
 }
+
+/// Run `ae` with its stdout closed before it writes — `ae … | head` once head
+/// has had enough. Returns (success, stderr).
+fn run_into_closed_pipe(sock: &std::path::Path, args: &[&str], stdin: &str) -> (bool, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ae"))
+        .arg("--socket")
+        .arg(sock)
+        .arg("--db")
+        .arg(sock.with_extension("db"))
+        .args(args)
+        .env("AE_CONSOLIDATE_SECS", "-1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    // `ae` may stop reading once its output has nowhere to go.
+    let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn output_into_a_closed_pipe_exits_quietly() {
+    let sock = scratch_socket("epipe");
+    {
+        // More output than a pipe buffers, so the write fails even if the
+        // reader hangs up late.
+        let s = store_of(&sock);
+        for i in 0..4000 {
+            s.declare_acronym(&format!("ZQ{i}X")).unwrap();
+        }
+    }
+    let lines = "Check the KPI and the OKR.\n".repeat(3000);
+    for (args, stdin) in [
+        (&["candidates"][..], ""),
+        (&["candidates", "-j"][..], ""),
+        (&["-r"][..], lines.as_str()),
+        (&["-r", "-J"][..], lines.as_str()),
+    ] {
+        let (ok, stderr) = run_into_closed_pipe(&sock, args, stdin);
+        assert!(ok, "{args:?} failed: {stderr}");
+        assert!(stderr.is_empty(), "{args:?} complained: {stderr}");
+    }
+}

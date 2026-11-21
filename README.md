@@ -110,19 +110,20 @@ ae rm --restore                       # restore the most recent backup (or pass 
 `ae stats` says how much of the dictionary is signal:
 
 ```text
-confirmed   9 expansions, 9 acronyms
-verified    7 (78%), 6 built-in
-inline      2, 1 aligned (50%)
-mined       1
-candidates  2, 1 watched
+confirmed   9 expansions across 9 acronyms
+verified    7 (78%): 6 built-in defaults, 1 added by you
+inline      2 learned from text, 1 (50%) spelling their acronym
+mined       1 speculative (ae suggest)
+candidates  2 undefined, 1 being mined for expansions
 ```
 
 `verified` is what a person asserted (`user` rows); the schema doesn't record
-which of those were seeded, so `built-in` counts the ones still matching the
-built-in defaults. `aligned` is how many inline-learned expansions have
-initials that spell their acronym; a low share means `ae prune` is worth
-running. `mined` is speculation (aligned by construction), `watched` the
-candidates ae mines for. Shares are rounded to two decimals in JSON (`-j`, or
+which of those were seeded, so the built-in count (`builtin` in JSON) is the
+ones still matching the built-in defaults. The inline line's second count
+(`aligned`) is how many inline-learned expansions have initials that spell
+their acronym; a low share means `ae prune` is worth running. `mined` is
+speculation (aligned by construction); the candidates being mined (`watched`)
+are those declared or seen often enough. Shares are rounded to two decimals in JSON (`-j`, or
 `-J` for one line) and are `null` when there's nothing to divide.
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently

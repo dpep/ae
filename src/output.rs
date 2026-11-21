@@ -136,7 +136,8 @@ pub fn render_candidates(
     Ok(())
 }
 
-/// Render speculative expansions: `(acronym, expansion, count, confidence)`.
+/// Render dictionary health (`ae stats`). Human labels spell out what each
+/// count means; the JSON keys are [`crate::store::DictionaryStats`]' fields.
 pub fn render_stats(
     out: &mut impl Write,
     stats: &crate::store::DictionaryStats,
@@ -148,25 +149,30 @@ pub fn render_stats(
             let s = stats;
             writeln!(
                 out,
-                "confirmed   {} expansions, {} acronyms",
+                "confirmed   {} expansions across {} acronyms",
                 s.confirmed, s.acronyms
             )?;
             writeln!(
                 out,
-                "verified    {}{}, {} built-in",
+                "verified    {}{}: {} built-in defaults, {} added by you",
                 s.verified,
                 pct(s.verified_share),
-                s.builtin
+                s.builtin,
+                s.verified.saturating_sub(s.builtin)
             )?;
             writeln!(
                 out,
-                "inline      {}, {} aligned{}",
+                "inline      {} learned from text, {}{} spelling their acronym",
                 s.inline,
                 s.aligned,
                 pct(s.aligned_share)
             )?;
-            writeln!(out, "mined       {}", s.mined)?;
-            writeln!(out, "candidates  {}, {} watched", s.candidates, s.watched)?;
+            writeln!(out, "mined       {} speculative (ae suggest)", s.mined)?;
+            writeln!(
+                out,
+                "candidates  {} undefined, {} being mined for expansions",
+                s.candidates, s.watched
+            )?;
         }
         Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(stats).unwrap())?,
         Format::Ndjson => writeln!(out, "{}", serde_json::to_string(stats).unwrap())?,
@@ -174,6 +180,7 @@ pub fn render_stats(
     Ok(())
 }
 
+/// Render speculative expansions: `(acronym, expansion, count, confidence)`.
 pub fn render_suggestions(
     out: &mut impl Write,
     rows: &[(String, String, i64, f32)],
@@ -537,5 +544,30 @@ mod tests {
             serde_json::from_str(&status_rendered(None, Format::Json)).unwrap();
         assert_eq!(down["running"], false);
         assert_eq!(down["socket"], "/tmp/ae.sock");
+    }
+
+    #[test]
+    fn human_stats_say_what_each_count_means() {
+        let stats = crate::store::DictionaryStats {
+            confirmed: 9,
+            acronyms: 9,
+            verified: 7,
+            builtin: 6,
+            verified_share: Some(0.78),
+            inline: 2,
+            aligned: 1,
+            aligned_share: Some(0.5),
+            mined: 1,
+            candidates: 2,
+            watched: 1,
+        };
+        let mut buf = Vec::new();
+        render_stats(&mut buf, &stats, Format::Human).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        // 7 verified = 6 built-in defaults + 1 of yours.
+        for phrase in ["6 built-in defaults", "1 added by you", "being mined"] {
+            assert!(out.contains(phrase), "missing {phrase:?} in:\n{out}");
+        }
+        assert!(!out.contains(" watched"), "{out}");
     }
 }

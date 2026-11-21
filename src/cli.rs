@@ -13,6 +13,14 @@ use clap::{CommandFactory, Parser, Subcommand};
 use crate::engine::Engine;
 use crate::{ipc, output};
 
+/// `println!` that tolerates a closed stdout, where `println!` panics: a
+/// reader that hung up (`ae … | head`) already has what it wanted.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        let _ = writeln!(io::stdout(), $($arg)*);
+    }};
+}
+
 const AFTER_HELP: &str = "\
 Analyzing text returns three buckets:
   expansions   known acronyms, resolved from the dictionary and ranked
@@ -317,7 +325,7 @@ pub fn run() -> ExitCode {
         };
     }
     let _ = Cli::command().print_help();
-    println!();
+    say!();
     ExitCode::SUCCESS
 }
 
@@ -377,7 +385,7 @@ fn serve_text(cli: &Cli, fmt: Format, text: &str) -> ExitCode {
     if !cli.quiet {
         let stdout = io::stdout();
         if let Err(e) = output::render(&mut stdout.lock(), &payload, fmt) {
-            return fail(fmt, &format!("render failed: {e}"));
+            return render_failed(fmt, e);
         }
     }
     ExitCode::SUCCESS
@@ -468,7 +476,7 @@ fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode 
         if buffered {
             collected.push(payload);
         } else if let Err(e) = output::stream_line(&mut out, &payload, fmt) {
-            return fail(fmt, &format!("render failed: {e}"));
+            return render_failed(fmt, e);
         } else {
             emitted += 1;
         }
@@ -477,7 +485,7 @@ fn run_stream(cli: &Cli, fmt: Format, reader: Box<dyn io::BufRead>) -> ExitCode 
     if !cli.quiet {
         if buffered {
             if let Err(e) = output::render_lines(&mut out, &collected, fmt) {
-                return fail(fmt, &format!("render failed: {e}"));
+                return render_failed(fmt, e);
             }
         } else if emitted == 0 && fmt == Format::Human {
             let _ = writeln!(out, "No acronyms found.");
@@ -509,7 +517,7 @@ fn run_status(cli: &Cli, fmt: Format) -> ExitCode {
             &cli.db_path(),
             fmt,
         ) {
-            return fail(fmt, &format!("render failed: {e}"));
+            return render_failed(fmt, e);
         }
     }
     if report.is_some() {
@@ -549,7 +557,7 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             Ok(stats) => {
                 let stdout = io::stdout();
                 if let Err(e) = output::render_stats(&mut stdout.lock(), &stats, fmt) {
-                    return fail(fmt, &format!("render failed: {e}"));
+                    return render_failed(fmt, e);
                 }
                 ExitCode::SUCCESS
             }
@@ -575,7 +583,7 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
                     .collect();
                 let stdout = io::stdout();
                 if let Err(e) = output::render_candidates(&mut stdout.lock(), &rows, fmt) {
-                    return fail(fmt, &format!("render failed: {e}"));
+                    return render_failed(fmt, e);
                 }
                 ExitCode::SUCCESS
             }
@@ -661,7 +669,7 @@ fn run_ignore(
             Ok(list) => {
                 let stdout = io::stdout();
                 if let Err(e) = output::render_ignored(&mut stdout.lock(), &list, fmt) {
-                    return fail(fmt, &format!("render failed: {e}"));
+                    return render_failed(fmt, e);
                 }
                 ExitCode::SUCCESS
             }
@@ -729,10 +737,10 @@ fn run_add(
         match fmt {
             Format::Human => {
                 for expansion in expansions {
-                    println!("ae: added {acronym} → {expansion}");
+                    say!("ae: added {acronym} → {expansion}");
                 }
             }
-            _ => println!(
+            _ => say!(
                 "{}",
                 serde_json::json!({"status": "added", "acronym": acronym, "added": expansions})
             ),
@@ -799,7 +807,7 @@ fn run_suggest(
 
     let stdout = io::stdout();
     if let Err(e) = output::render_suggestions(&mut stdout.lock(), &scored, fmt) {
-        return fail(fmt, &format!("render failed: {e}"));
+        return render_failed(fmt, e);
     }
     ExitCode::SUCCESS
 }
@@ -836,7 +844,7 @@ fn run_prune(
                     .as_ref()
                     .map(|p| format!(" — backup saved to {}", p.display()))
                     .unwrap_or_default();
-                println!(
+                say!(
                     "ae: pruned — dropped {} unaligned inline definitions, merged {} case-only duplicates; corrected {}, merged {}, dropped {} weak expansions, removed {} noise candidates and {} non-acronym candidates ({} mined expansions){saved}",
                     s.unaligned,
                     s.case_merged,
@@ -848,7 +856,7 @@ fn run_prune(
                     s.non_acronym_expansions
                 )
             }
-            _ => println!(
+            _ => say!(
                 "{}",
                 serde_json::json!({
                     "status": "pruned",
@@ -916,10 +924,10 @@ fn run_define(
         match fmt {
             Format::Human => {
                 for expansion in &chosen {
-                    println!("ae: added {acronym_upper} → {expansion}");
+                    say!("ae: added {acronym_upper} → {expansion}");
                 }
             }
-            _ => println!(
+            _ => say!(
                 "{}",
                 serde_json::json!({"status": "defined", "acronym": acronym_upper, "added": chosen})
             ),
@@ -1138,11 +1146,11 @@ fn run_wipe_all(store: &crate::store::Store, db: &Path, fmt: Format, quiet: bool
     };
     if !quiet {
         match fmt {
-            Format::Human => println!(
+            Format::Human => say!(
                 "ae: cleared {entries} entries and {candidates} candidates — backup saved to {}",
                 backup.display()
             ),
-            _ => println!(
+            _ => say!(
                 "{}",
                 serde_json::json!({
                     "status": "cleared",
@@ -1215,12 +1223,12 @@ fn run_restore(
     }
     if !quiet {
         match fmt {
-            Format::Human => println!(
+            Format::Human => say!(
                 "ae: restored from {} (prior state backed up to {})",
                 src.display(),
                 prior.display()
             ),
-            _ => println!(
+            _ => say!(
                 "{}",
                 serde_json::json!({
                     "status": "restored",
@@ -1338,9 +1346,9 @@ fn removed_status(
                 let saved = backup
                     .map(|p| format!(" — backup saved to {}", p.display()))
                     .unwrap_or_default();
-                println!("ae: removed {n} {noun} {scope}{saved}");
+                say!("ae: removed {n} {noun} {scope}{saved}");
             }
-            _ => println!(
+            _ => say!(
                 "{}",
                 serde_json::json!({
                     "status": "removed",
@@ -1377,7 +1385,7 @@ fn emit_entries(fmt: Format, entries: rusqlite::Result<Vec<(String, String, Stri
         Ok(entries) => {
             let stdout = io::stdout();
             if let Err(e) = output::render_entries(&mut stdout.lock(), &entries, fmt) {
-                return fail(fmt, &format!("render failed: {e}"));
+                return render_failed(fmt, e);
             }
             ExitCode::SUCCESS
         }
@@ -1407,8 +1415,8 @@ fn init_logging(level: &str) {
 fn status(fmt: Format, quiet: bool, code: &str, human: &str) -> ExitCode {
     if !quiet {
         match fmt {
-            Format::Human => println!("ae: {human}"),
-            _ => println!("{}", serde_json::json!({ "status": code })),
+            Format::Human => say!("ae: {human}"),
+            _ => say!("{}", serde_json::json!({ "status": code })),
         }
     }
     ExitCode::SUCCESS
@@ -1421,6 +1429,15 @@ fn fail(fmt: Format, msg: &str) -> ExitCode {
         _ => eprintln!("{}", serde_json::json!({ "error": msg })),
     }
     ExitCode::FAILURE
+}
+
+/// Report a failed write of command output — unless the reader hung up
+/// (`ae … | head`), which is how a pipeline says it has enough.
+fn render_failed(fmt: Format, e: io::Error) -> ExitCode {
+    if e.kind() == io::ErrorKind::BrokenPipe {
+        return ExitCode::SUCCESS;
+    }
+    fail(fmt, &format!("render failed: {e}"))
 }
 
 #[cfg(test)]
