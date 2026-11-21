@@ -15,7 +15,7 @@ TPS      Transaction Processing System            extraction 0.95
 XYZ      (no expansion)                           candidate
 ```
 
-Unlike a static glossary, ae grows its own dictionary by watching the stream — extracting inline definitions, and *mining* speculative expansions from prose where word initials spell a watched acronym (no parentheses needed).
+Unlike a static glossary, ae grows its own dictionary by watching the stream — extracting inline definitions, and *mining* speculative expansions from prose that mentions an acronym beside words whose initials spell it (no parentheses needed).
 
 ## Two scores, not one
 
@@ -146,9 +146,9 @@ contrast against, an all-caps sentence would otherwise flag every short word.
 
 Each acronym has a **provenance**: `declared` (you said it's an acronym, via
 `ae add ACR` with no expansion) or `seen` (ae noticed it). An acronym joins the
-**watch list** — where we hunt its expansions in later text — once it's declared
-or has been *seen* enough times (default 3); below that it's noise and `ae prune`
-drops it. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
+**watch list** once it's declared or has been *seen* enough times (default 3);
+below that it's noise and `ae prune` drops it. A declared acronym is mined
+wherever it's mentioned, even when it's also a word and so never a candidate. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
 detected and mined too (the `&`/`.` maps to a skipped filler word), and a longer
 match wins over its parts (`PB&J` beats `PB`, maximal munch).
 
@@ -186,21 +186,18 @@ any to change it backs up first, like `rm --all`; the JSON reports
 `unaligned_removed`, `case_duplicates_merged` and `backup`. The automatic pass
 never touches confirmed entries.
 
-`ae suggest` is the payoff of tracking candidates. When `ae` analyzes text it
-mines word-sequences whose initials spell a watched candidate acronym — no
-parentheses needed, tolerant of skipped filler words (`OKR` = Objectives *and*
-Key Results), and across *subsequent* inputs too (a definition mentioned in a
-later sentence that never repeats the acronym still accrues). It counts how often
-each phrase recurs and how well its context fits where the acronym is used, then
-blends both into a confidence:
+`ae suggest` is the payoff of tracking candidates. When `ae` analyzes text that
+mentions an acronym, it mines word-sequences in that same text whose initials
+spell it — no parentheses needed, tolerant of skipped filler words (`OKR` =
+Objectives *and* Key Results). Text that never mentions the acronym is not
+mined for it: on real prompts that produced only coincidences. It counts how
+often each phrase recurs, then turns that into a confidence:
 
 ```sh
-$ ae add FOO                                          # declare it — start watching
-ae: now watching FOO for expansions
-$ ae "the Foundations Of Onboarding workshop was great"   # initials spell FOO
-No acronyms found.
-$ ae suggest FOO --min-confidence 0                   # ae mined the phrase
-FOO   foundation of onboarding   0.50 (1)
+$ ae "our QOP is the Quarterly Onboarding Plan"      # initials spell QOP
+QOP      (no expansion)                           candidate
+$ ae suggest QOP --min-confidence 0                   # ae mined the phrase
+QOP      quarterly onboarding plan                0.50 (1)
 ```
 
 Confirm one with `ae define MVP` (interactive) or `ae add MVP "Minimum Viable

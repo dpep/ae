@@ -5,6 +5,7 @@
 //! [`AnalysisPayload`]. The Leader holds one of these for the process lifetime;
 //! the fallback path builds an ephemeral one per invocation.
 
+use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,14 +46,14 @@ pub fn prune_grace_secs() -> i64 {
 static PUNCTUATED_ACRONYM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Z][A-Z0-9]*(?:[&.][A-Z0-9]+)+").unwrap());
 
-/// Backstop so the cached mining trie can't outlive an out-of-band edit that
+/// Backstop so the cached dictionary can't outlive an out-of-band edit that
 /// happened to leave the signature unchanged (a rare `rm` + `add` pair).
-const MINING_TRIE_MAX_AGE: Duration = Duration::from_secs(300);
+const DICTIONARY_MAX_AGE: Duration = Duration::from_secs(300);
 
-/// The cached base mining trie (watch list ∪ known acronyms), with the cheap
-/// store signature it — and the expansion trie — were last synced at, and when.
-struct MiningCache {
-    trie: Arc<MiningTrie>,
+/// The cached watch list, with the cheap store signature it — and the
+/// expansion trie — were last synced at, and when.
+struct DictionaryCache {
+    watched: Arc<HashSet<String>>,
     signature: (i64, i64, i64),
     built_at: Instant,
 }
@@ -63,7 +64,7 @@ pub struct Engine {
     embedder: Box<dyn Embedder>,
     /// Rebuilt only when the signature changes (or it ages out) — cheap to reuse
     /// across the many requests a warm daemon serves.
-    mining_cache: Mutex<Option<MiningCache>>,
+    dictionary_cache: Mutex<Option<DictionaryCache>>,
 }
 
 impl Engine {
@@ -77,7 +78,7 @@ impl Engine {
             store,
             trie,
             embedder,
-            mining_cache: Mutex::new(None),
+            dictionary_cache: Mutex::new(None),
         })
     }
 
@@ -112,7 +113,7 @@ impl Engine {
     /// candidate on the pass that discovers it, then as a known expansion
     /// thereafter.
     pub fn analyze(&self, text: &str) -> rusqlite::Result<AnalysisPayload> {
-        let base = self.sync_dictionary()?;
+        let watched = self.sync_dictionary()?;
         let query_vec = QueryVec::new(self.embedder.as_ref(), text);
         let ignored = self.store.ignored_set()?;
 
@@ -122,8 +123,21 @@ impl Engine {
         let candidates = candidate_acronyms(text, &expansions, &confirmed, &ignored);
 
         // Stage 3: candidate tracking + speculative expansion mining (analysis
-        // only — read-only leaves no trace).
-        self.mine(text, &query_vec, &candidates, &base)?;
+        // only — read-only leaves no trace). Mining covers every acronym this
+        // text mentions: candidates, known ones, and watched ones (a declared
+        // acronym that is also a word is never a candidate).
+        let mentioned: HashSet<String> = candidates
+            .iter()
+            .cloned()
+            .chain(expansions.iter().map(|r| r.acronym.clone()))
+            .chain(
+                punctuated_acronyms(text)
+                    .chain(mention_tokens(text))
+                    .map(str::to_uppercase)
+                    .filter(|t| watched.contains(t)),
+            )
+            .collect();
+        self.mine(text, &candidates, &mentioned)?;
 
         Ok(AnalysisPayload {
             sentence: text.to_string(),
@@ -319,49 +333,39 @@ impl Engine {
         Ok(())
     }
 
-    /// Record candidate sightings, then mine speculative expansions in a single
-    /// pass and accumulate vector coherence.
+    /// Record candidate sightings, then mine speculative expansions for the
+    /// acronyms this text `mentioned`, from this text alone.
     ///
-    /// Mining walks the text once over a [`MiningTrie`], emitting every acronym
-    /// whose word initials it spells — O(text), not O(acronyms × text). The
-    /// `base` trie (watch list ∪ known acronyms) is cached across requests (see
-    /// [`Self::sync_dictionary`]); the candidates *seen in this text* are mined
-    /// via a tiny per-request trie, so a brand-new one is caught on first sight.
+    /// Mining walks the text once over a [`MiningTrie`] of those acronyms,
+    /// emitting every one whose word initials it spells. A phrase is credited to
+    /// an acronym only when the acronym appears beside it: mining for watched
+    /// acronyms in texts that never mention them made nearly all of a real
+    /// dictionary's mined rows, and they were noise (`UTF: use the foo`).
     fn mine(
         &self,
         text: &str,
-        query_vec: &QueryVec,
         candidates: &[String],
-        base: &MiningTrie,
+        mentioned: &HashSet<String>,
     ) -> rusqlite::Result<()> {
         for acronym in candidates {
             self.store.record_candidate(acronym)?;
         }
 
         let mut present = MiningTrie::default();
-        for acronym in candidates.iter().filter(|a| is_mine_worthy(a)) {
+        for acronym in mentioned.iter().filter(|a| is_mine_worthy(a)) {
             present.insert(acronym);
         }
-        // Present-trie hits are *same-sentence* co-occurrences: the acronym
-        // appeared as a candidate in this very text alongside the phrase that
-        // spells it. That's first-hand evidence, stronger than a cross-text
-        // (base-trie) guess, so it earns full coherence credit.
-        let present_matches: std::collections::HashSet<(String, String)> =
-            present.mine(text).into_iter().collect();
-        let mut matches: std::collections::HashSet<(String, String)> =
-            base.mine(text).into_iter().collect();
-        matches.extend(present_matches.iter().cloned());
 
         // Route each match: a recurrence of a *known* expansion strengthens its
         // context; anything else is a (new or already-speculative) alternative.
-        for (acronym, phrase) in matches {
+        for (acronym, phrase) in present.mine(text) {
             let confirmed = self.store.expansions_for(&acronym)?;
             match confirmed
                 .iter()
                 .find(|(_, e, _)| e.to_lowercase() == phrase)
             {
                 // Store the matched phrase's embedding, not the whole-sentence
-                // query_vec: scoring a later identical sentence against a stored
+                // query: scoring a later identical sentence against a stored
                 // copy of itself self-matches to cosine 1.0 (and makes the warm
                 // daemon, which accumulates that vector, disagree with a fresh
                 // in-process run). Mirrors learn_and_persist storing embed(def).
@@ -370,68 +374,40 @@ impl Engine {
                     self.store.add_context(*id, &ctx)?;
                 }
                 None => {
-                    let coherence = if present_matches.contains(&(acronym.clone(), phrase.clone()))
-                    {
-                        SAME_SENTENCE_COHERENCE
-                    } else {
-                        self.context_coherence(&acronym, query_vec)?
-                    };
-                    self.store.record_potential(&acronym, &phrase, coherence)?;
+                    self.store
+                        .record_potential(&acronym, &phrase, MINED_COHERENCE)?;
                 }
             }
-        }
-
-        // Fold this text into each present candidate's context — after mining, so
-        // the coherence above reflects prior sightings, not this one.
-        for acronym in candidates {
-            self.store
-                .update_candidate_context(acronym, query_vec.get())?;
         }
         Ok(())
     }
 
-    /// Bring the warm tries in line with the store and return the base mining
-    /// trie (watch list ∪ known acronyms, 3+ letters). Both are rebuilt only
-    /// when the cheap `(known, watch-list, ignored)` signature changes — which
-    /// catches out-of-band edits from another process (`add`/`rm`/`watch`/…)
-    /// since they move those counts — or when it ages past
-    /// [`MINING_TRIE_MAX_AGE`].
-    fn sync_dictionary(&self) -> rusqlite::Result<Arc<MiningTrie>> {
+    /// Bring the warm expansion trie in line with the store and return the
+    /// watch list. Both are rebuilt only when the cheap `(known, watch-list,
+    /// ignored)` signature changes — which catches out-of-band edits from
+    /// another process (`add`/`rm`/`watch`/…) since they move those counts —
+    /// or when it ages past [`DICTIONARY_MAX_AGE`].
+    fn sync_dictionary(&self) -> rusqlite::Result<Arc<HashSet<String>>> {
         let signature = (
             self.store.count()?,
             self.store.watch_list_count()?,
             self.store.ignored_count()?,
         );
-        let mut cache = self.mining_cache.lock().unwrap();
+        let mut cache = self.dictionary_cache.lock().unwrap();
         if let Some(c) = cache
             .as_ref()
-            .filter(|c| c.signature == signature && c.built_at.elapsed() < MINING_TRIE_MAX_AGE)
+            .filter(|c| c.signature == signature && c.built_at.elapsed() < DICTIONARY_MAX_AGE)
         {
-            return Ok(c.trie.clone());
+            return Ok(c.watched.clone());
         }
-        let known = self.store.all_acronyms()?;
-        self.trie.replace(&known);
-        let watched = self.store.watch_list()?;
-        let mut trie = MiningTrie::default();
-        for acronym in watched.iter().chain(&known).filter(|a| is_mine_worthy(a)) {
-            trie.insert(acronym);
-        }
-        let trie = Arc::new(trie);
-        *cache = Some(MiningCache {
-            trie: trie.clone(),
+        self.trie.replace(self.store.all_acronyms()?);
+        let watched = Arc::new(self.store.watch_list()?.into_iter().collect());
+        *cache = Some(DictionaryCache {
+            watched: Arc::clone(&watched),
             signature,
             built_at: Instant::now(),
         });
-        Ok(trie)
-    }
-
-    /// Cosine of this text's embedding against where `acronym` usually appears
-    /// (`1.0` when we have no history yet — neutral, don't penalize).
-    fn context_coherence(&self, acronym: &str, query_vec: &QueryVec) -> rusqlite::Result<f32> {
-        Ok(match self.store.candidate_context_mean(acronym)? {
-            Some(mean) => cosine_similarity(query_vec.get(), &mean).clamp(0.0, 1.0),
-            None => 1.0,
-        })
+        Ok(watched)
     }
 }
 
@@ -466,8 +442,8 @@ fn is_mine_worthy(acronym: &str) -> bool {
 }
 
 /// The text's embedding, computed on first use. Inference dominates the cost of
-/// an analysis, and most lines never need it — nothing to score, no candidate
-/// context to fold into.
+/// an analysis, and most lines never need it: only an acronym with several
+/// expansions is scored against it.
 struct QueryVec<'a> {
     embedder: &'a dyn Embedder,
     text: &'a str,
@@ -504,11 +480,9 @@ fn is_filler(word: &str) -> bool {
 /// fillers we'll skip while spelling out an acronym.
 const MAX_MINE_SPAN: usize = 12;
 
-/// Coherence credited to a *same-sentence* mined expansion — one whose acronym
-/// appeared in the very text that spells it out. The co-occurrence is direct
-/// evidence, so it gets the maximum (1.0), ranking it above cross-text guesses
-/// in `suggest` without being promoted to a confident extraction.
-const SAME_SENTENCE_COHERENCE: f32 = 1.0;
+/// Coherence credited to a mined expansion. Mining only pairs a phrase with an
+/// acronym written in the same text, so every match gets the maximum.
+const MINED_COHERENCE: f32 = 1.0;
 
 /// A trie of acronyms keyed by their letters (punctuation stripped, so `PB&J`
 /// keys as `PBJ`), used to mine a whole text for *every* stored acronym's
@@ -801,10 +775,10 @@ mod tests {
     }
 
     #[test]
-    fn a_candidate_still_gets_embedded() {
+    fn a_candidate_needs_no_inference() {
         let (e, calls) = counting_engine();
         e.analyze("the ZQX rollout slipped").unwrap();
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1025,40 +999,23 @@ mod tests {
     }
 
     #[test]
-    fn cross_text_mining_waits_for_the_watch_threshold() {
+    fn a_phrase_is_not_mined_for_an_acronym_the_text_does_not_mention() {
         let e = Engine::in_memory().unwrap();
-        // Seen twice (< threshold of 3) → not yet on the watch list.
-        e.analyze("the MVP ships next week").unwrap();
-        e.analyze("ping me about the MVP today").unwrap();
-        e.analyze("we scoped a minimum viable product for launch")
-            .unwrap();
-        assert!(e.potentials_for("MVP").unwrap().is_empty());
-
-        // A third sighting promotes it; now cross-text mining picks the phrase up.
-        e.analyze("the MVP demo is friday").unwrap();
-        e.analyze("we shipped a minimum viable product").unwrap();
-        let pots = e.potentials_for("MVP").unwrap();
-        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
-    }
-
-    #[test]
-    fn declaring_an_acronym_makes_it_mine_worthy_immediately() {
-        let e = Engine::in_memory().unwrap();
-        e.declare_acronym("MVP").unwrap();
-        // Never seen as a token, but a phrase in this text is mined for it.
-        e.analyze("we scoped a minimum viable product for launch")
-            .unwrap();
-        let pots = e.potentials_for("MVP").unwrap();
-        assert!(pots.iter().any(|(p, _)| p == "minimum viable product"));
+        e.declare_acronym("UTF").unwrap();
+        e.analyze("use the FOO and BAR list of file types").unwrap();
+        // KPI is known; its letters are spelled here but it isn't mentioned.
+        e.analyze("the kangaroo population index rose").unwrap();
+        assert!(e.potentials_for("UTF").unwrap().is_empty());
+        assert!(e.potentials_for("KPI").unwrap().is_empty());
     }
 
     #[test]
     fn consolidate_dedups_and_prunes() {
         let e = Engine::in_memory().unwrap();
         e.declare_acronym("MVP").unwrap();
-        // Cross-text mining (MVP declared) records two near-duplicate phrases.
-        e.analyze("we want a minimum viable product").unwrap();
-        e.analyze("ship a min viable product too").unwrap();
+        // Two near-duplicate phrases beside MVP.
+        e.analyze("the MVP: a minimum viable product").unwrap();
+        e.analyze("ship the MVP, a min viable product").unwrap();
         assert_eq!(e.potentials_for("MVP").unwrap().len(), 2);
         e.consolidate(0.0, 0).unwrap(); // min_confidence 0 → only dedup, no drops
         let pots = e.potentials_for("MVP").unwrap();
@@ -1070,9 +1027,9 @@ mod tests {
     fn consolidate_drops_a_seen_once_expansion_past_grace_but_keeps_a_recurring_one() {
         let e = Engine::in_memory().unwrap();
         e.declare_acronym("MVP").unwrap();
-        e.analyze("we want a minimum viable product").unwrap();
-        e.analyze("ship the minimum viable product").unwrap();
-        e.analyze("a marvelous velvet pillow").unwrap();
+        e.analyze("the MVP: a minimum viable product").unwrap();
+        e.analyze("ship the MVP minimum viable product").unwrap();
+        e.analyze("an MVP: a marvelous velvet pillow").unwrap();
         // A floor of 0 drops nothing on confidence alone; only recurrence counts.
         e.consolidate(0.0, 0).unwrap();
         let pots = e.potentials_for("MVP").unwrap();
@@ -1084,7 +1041,7 @@ mod tests {
     fn consolidate_spares_recently_mined_low_confidence_expansions() {
         let e = Engine::in_memory().unwrap();
         e.declare_acronym("MVP").unwrap();
-        e.analyze("we want a minimum viable product").unwrap();
+        e.analyze("the MVP: a minimum viable product").unwrap();
         assert!(!e.potentials_for("MVP").unwrap().is_empty());
         // A high floor would drop this speculative row — but it was just mined,
         // so the grace window spares it...
@@ -1096,49 +1053,14 @@ mod tests {
     }
 
     #[test]
-    fn a_same_sentence_spelling_gets_full_coherence_credit() {
-        let e = Engine::in_memory().unwrap();
-        e.declare_acronym("PQR").unwrap();
-        // Prior, unrelated context — so a cross-text mention would score the
-        // current text's coherence below 1.0.
-        e.analyze("the PQR project timeline shifted").unwrap();
-        // Same sentence: the acronym token co-occurs with a phrase spelling it,
-        // so the mined suggestion is credited maximal coherence (1.0). Read the
-        // raw coh_sum from the store (the Engine accessor drops it).
-        e.analyze("our PQR is the peaceful quiet retreat").unwrap();
-        let pots = e.store.potentials_for("PQR").unwrap();
-        let (_, count, coh) = pots
-            .iter()
-            .find(|(p, _, _)| p == "peaceful quiet retreat")
-            .expect("mined the same-sentence spelling");
-        assert_eq!(*count, 1);
-        assert!(
-            (*coh - 1.0).abs() < 1e-6,
-            "same-sentence coherence should be 1.0, got {coh}"
-        );
-    }
-
-    #[test]
     fn known_acronyms_mine_alternative_expansions() {
         let e = Engine::in_memory().unwrap();
-        // KPI is a known default ("Key Performance Indicator"). A text whose
-        // initials spell KPI with a *different* phrase mines an alternative.
-        e.analyze("the kangaroo population index rose").unwrap();
+        // KPI is a known default ("Key Performance Indicator"). A text naming
+        // KPI beside a *different* phrase that spells it mines an alternative.
+        e.analyze("this KPI is the kangaroo population index")
+            .unwrap();
         let pots = e.potentials_for("KPI").unwrap();
         assert!(pots.iter().any(|(p, _)| p == "kangaroo population index"));
-    }
-
-    #[test]
-    fn mining_trie_cache_picks_up_a_newly_declared_acronym() {
-        let e = Engine::in_memory().unwrap();
-        // First analysis builds the cache without ZZQ on the watch list.
-        e.analyze("nothing to see here").unwrap();
-        // Declaring it shifts the watch-list signature...
-        e.declare_acronym("ZZQ").unwrap();
-        // ...so the next analysis rebuilds the cache and mines it.
-        e.analyze("the zebra zoo quarterly opened").unwrap();
-        let pots = e.potentials_for("ZZQ").unwrap();
-        assert!(pots.iter().any(|(p, _)| p == "zebra zoo quarterly"));
     }
 
     #[test]
@@ -1353,10 +1275,12 @@ mod tests {
     #[test]
     fn a_declared_noise_token_is_still_mined() {
         let e = Engine::in_memory().unwrap();
-        // The filter only hides candidates; a declared acronym is mined from
-        // the watch list regardless.
+        // Warm the cache first, so declaring has to invalidate it.
+        e.analyze("nothing to see here").unwrap();
+        // The filter only hides candidates; a declared acronym the text
+        // mentions is mined regardless.
         e.declare_acronym("TODO").unwrap();
-        let out = e.analyze("we track our daily output here").unwrap();
+        let out = e.analyze("TODO: track our daily output here").unwrap();
         assert!(out.candidates.is_empty());
         assert!(!e.potentials_for("TODO").unwrap().is_empty());
     }

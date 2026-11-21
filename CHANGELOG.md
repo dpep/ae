@@ -97,6 +97,13 @@ releases are grouped at the end.
   `JSON (JavaScript Object Notation)` and `GitHub (GH)` are learned. One that
   doesn't spell its acronym is reported as an extraction and nothing more; it
   is not kept for `ae suggest` either. Nothing to do.
+- Expansions are mined only from text that mentions the acronym. Mining a
+  watched acronym from any text whose initials happened to spell it
+  (`UTF: use the foo`) made nearly all of `ae suggest`'s list. A declared
+  acronym is now mined where it's written, not everywhere. Mined rows
+  already in your dictionary are mostly such coincidences: run
+  `ae rm --unverified` to drop them (it also drops inline-learned rows; see
+  above), or let `ae prune` age out the ones seen once.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

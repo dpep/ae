@@ -1183,11 +1183,35 @@ fn an_inline_definition_learns_only_when_its_initials_spell_the_acronym() {
     // A fragment that doesn't spell KPI is reported but leaves no suggestion.
     let out = run(&sock, &["-j"], Some("Ping the Platform Team (KPI) today"));
     assert!(out.stdout.contains("extraction"), "{}", out.stdout);
-    let s = run(
-        &sock,
-        &["suggest", "KPI", "--min-confidence", "0", "-j"],
+    assert!(suggestions(&sock, "KPI").is_empty());
+}
+
+/// Every expansion `suggest` offers for `acronym`, at any confidence.
+fn suggestions(sock: &std::path::Path, acronym: &str) -> Vec<String> {
+    let out = run(
+        sock,
+        &["suggest", acronym, "--min-confidence", "0", "-j"],
         None,
     );
-    let v: serde_json::Value = serde_json::from_str(&s.stdout).unwrap();
-    assert!(v.as_array().unwrap().is_empty(), "{}", s.stdout);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["expansion"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn an_acronym_is_mined_only_from_text_that_mentions_it() {
+    let sock = scratch_socket("minementioned");
+    assert!(run(&sock, &["add", "UTF"], None).success);
+    run(
+        &sock,
+        &["-q"],
+        Some("use the FOO and BAR list of file types"),
+    );
+    assert!(suggestions(&sock, "UTF").is_empty());
+
+    run(&sock, &["-q"], Some("our UTF is the unified test format"));
+    assert_eq!(suggestions(&sock, "UTF"), ["unified test format"]);
 }

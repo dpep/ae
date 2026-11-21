@@ -88,6 +88,15 @@ from `it`. Tokens inside an identifier or path (`src/ID/x.rs`, `config.ID.url`,
 `$ID`, `foo_ID`) are skipped, by the same rule that keeps them off the
 candidate list.
 
+## Mining
+
+A text is mined only for the acronyms it mentions: its candidates, the known
+acronyms it expands, and watched (declared or recurring) acronyms written in
+it. A run of words whose initials spell one of them, skipping fillers, is
+recorded as a speculative `mined` expansion, or, when it equals a confirmed
+expansion, adds a context to it. Acronyms of one or two letters aren't mined.
+A text that never mentions an acronym is never mined for it.
+
 ## Expansion confidence
 
 An expansion finding's `confidence` is the probability that this expansion is
