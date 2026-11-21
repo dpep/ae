@@ -1,15 +1,15 @@
 ---
 name: SPEC
-description: The original ae (Acronym Engine) system specification, verbatim — the design contract the implementation tracks against.
+description: The ae (Acronym Engine) system specification — the original design contract, plus the matching, mining, confidence and schema rules the implementation tracks against.
 ---
 
 # ae (Acronym Engine) System Specification
 
-> This is the original specification as delivered. It is the design contract.
-> Where the implementation deviates (e.g. deferring ONNX inference behind a
-> trait, or storing vectors in a plain table instead of `vec0`), the deviation
-> is recorded in [ROADMAP.md](ROADMAP.md) with the rationale — not by silently
-> editing this document.
+> This is the design contract: the original specification, with the Matching,
+> Mining and Expansion confidence sections and the schema added as those rules
+> were settled. Where the implementation deviates from the original (e.g.
+> storing vectors in a plain table instead of `vec0`), the deviation is recorded
+> in [ROADMAP.md](ROADMAP.md) with the rationale.
 
 ## Architectural Overview & Goal
 
@@ -185,17 +185,23 @@ resource collisions across duplicate client windows.
 Embed SQLite, optimize the indexing schemas, and implement the normalization
 needed to prune 384-dimensional vectors down to 64 dimensions.
 
-- `acronym_dictionary(id, acronym, expansion, created_at)` with a unique index
-  on `(acronym, expansion)` (case-sensitive, but adding an expansion that
-  differs only in case updates the existing row instead of inserting a
-  sibling), and one on `(source, acronym)` so confirmed-only
-  lookups don't scan the (far larger) set of mined rows. Candidate acronyms
-  carry a partial index over just the watch list, for the same reason.
+- `acronym_dictionary(id, acronym, expansion, source, count, coh_sum,
+  created_at, last_seen)`: one row per `(acronym, expansion)`, confirmed
+  (`user`, `inline`) and speculative (`mined`) alike. The unique index on
+  `(acronym, expansion)` is case-sensitive, but adding an expansion that
+  differs only in ASCII case updates the existing row instead of inserting a
+  sibling. An index on `(source, acronym)` keeps confirmed-only lookups from
+  scanning the (far larger) set of mined rows.
+- `candidate_acronyms(acronym, count, source, first_seen, last_seen)`:
+  undefined acronym-shaped tokens, `declared` or `seen`. A partial index covers
+  just the watch list, for the same reason.
 - `ignored_acronyms(acronym, created_at)`: a mute list. Ignored acronyms stay in
   the dictionary but go inert — excluded from the expansion trie, the mining and
   watch lists, suggestions, and candidate surfacing — until `unignore`. Distinct
   from `rm`, which deletes the rows.
-- A 64-dimensional L2-normalized context-embedding store keyed by acronym.
+- `meta(key, value)`: housekeeping state, such as when consolidation last ran.
+- `acronym_contexts(acronym_id, context_embedding)`: 64-dimensional
+  L2-normalized context embeddings, keyed by dictionary row.
 - `compress_matryoshka_vector`: slice the first 64 coordinates, L2-normalize,
   guard divide-by-zero.
 

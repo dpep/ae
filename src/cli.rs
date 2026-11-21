@@ -27,9 +27,9 @@ Analyzing text returns three buckets:
   extractions  acronyms defined inline now, e.g. KPI (Key Performance Indicator)
   candidates   acronym-shaped tokens seen but not yet resolved — to define later
 
-Each expansion carries two scores: validity (is it a real expansion?) and
-confidence (is it the meaning here?). -j/--json and -J/--ndjson switch to
-machine output on every command.
+Each expansion carries one confidence: validity (is it a real expansion?) times
+its share of the context fit among the acronym's expansions (is it the meaning
+here?). -j/--json and -J/--ndjson switch to machine output on every command.
 
 A positional argument is analyzed as one text; piped stdin and --file are
 streamed line by line. Either way the structured output is the same flat list of
@@ -38,7 +38,7 @@ findings — -j is a pretty array, -J is one finding per line (a live stream).
 Examples:
   ae \"ship the MVP this sprint\"     analyze one string
   cat access.log | ae -J             stream stdin line by line as NDJSON
-  ae add OKR                         declare an acronym to watch & mine
+  ae add QOP                         declare an acronym to watch & mine
   ae list perf                       list entries matching \"perf\"";
 
 #[derive(Parser, Debug)]
@@ -73,7 +73,7 @@ pub struct Cli {
     #[arg(long)]
     pub status: bool,
 
-    /// JSON output: a pretty object (analysis) or `{"status": …}` (commands).
+    /// JSON output: a pretty array of findings (analysis) or `{"status": …}` (commands).
     #[arg(short = 'j', long, global = true, conflicts_with = "ndjson")]
     pub json: bool,
 
@@ -98,8 +98,9 @@ pub struct Cli {
     #[arg(long, env = "AE_DB", global = true)]
     pub db: Option<PathBuf>,
 
-    /// Embedding model: a path (directory or `.onnx` file) or a name resolved
-    /// against the model search dirs. Defaults to the bundled/cached model.
+    /// Embedding model: a path (directory or `.onnx` file) or a HuggingFace
+    /// `org/name` repo id. Defaults to `$AE_MODEL_DIR`, else all-MiniLM-L6-v2
+    /// from the Hub cache.
     #[arg(short, long)]
     pub model: Option<String>,
 
@@ -215,8 +216,8 @@ pub enum Command {
         /// up first, like `--all`).
         #[arg(long, conflicts_with_all = ["all", "expansion"])]
         unverified: bool,
-        /// Restore the dictionary from a backup made by `--all` or `--unverified`
-        /// (this database's most recent one if no path is given). The current
+        /// Restore the dictionary from a backup made by `--all`, `--unverified`
+        /// or `prune` (this database's most recent one if no path is given). The current
         /// state is backed up first, so a restore is reversible.
         #[arg(long, value_name = "PATH", num_args = 0..=1, conflicts_with_all = ["all", "unverified", "acronym", "expansion"])]
         restore: Option<Option<PathBuf>>,

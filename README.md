@@ -10,21 +10,33 @@ Acronym extraction and expansion — local, offline.
 
 ```sh
 $ ae "The OKR review needs a TPS (Transaction Processing System) sign-off before the XYZ ships."
-OKR      Objectives and Key Results               expansion  v1.00 c0.50
+OKR      Objectives and Key Results               expansion  1.00
 TPS      Transaction Processing System            extraction 0.95
 XYZ      (no expansion)                           candidate
 ```
 
 Unlike a static glossary, ae grows its own dictionary by watching the stream — extracting inline definitions, and *mining* speculative expansions from prose that mentions an acronym beside words whose initials spell it (no parentheses needed).
 
-## Two scores, not one
+## One score, two inputs
 
-Internally, every `(acronym, expansion)` pair is judged on two independent axes — the idea ae is built on:
+Every expansion finding carries one `confidence`: the probability that this expansion is what the acronym means here. Two independent judgements feed it:
 
-- **validity** — *is this a real expansion of the acronym?* Set by how the pair was learned: `1.0` when a human verified it, `0.9` for an inline definition, `0.0` for a speculative mined guess.
-- **context fit** — *is this the meaning here?* Cosine fit of the sentence against the contexts where the expansion has appeared; `0.5` with no evidence yet.
+- **validity** — *is this a real expansion of the acronym?* Set by how the pair was learned: `1.0` when a human verified it, `0.9` for an inline definition. Speculative mined guesses never expand; they wait in `ae suggest`.
+- **share** — *is this the meaning here?* How well the sentence fits each of the acronym's expansions, turned into probabilities that sum to 1 across them.
 
-A pair can be rock-solid valid (`PT → Part Time`) yet a poor fit in a physical-therapy paragraph. The structured output folds the two into **one** number — `confidence = validity × context fit` — so a consumer reads a single "trust this expansion here" score instead of guessing which axis to threshold. Both axes still drive ranking and pruning underneath, along a provenance continuum by source — `user` (verified) > `inline` > `mined` (speculative).
+`confidence = validity × share`. A sole expansion has nothing to disambiguate, so it scores its validity outright. Siblings split the probability by context:
+
+```sh
+$ ae add PT "Part Time" "Physical Therapy"
+$ ae -r "Knee surgery recovery means weekly PT sessions with exercises and stretching"
+PT       Physical Therapy                         expansion  0.76
+PT       Part Time                                expansion  0.24
+$ ae -r "She switched to PT hours so her salary and schedule changed"
+PT       Part Time                                expansion  0.90
+PT       Physical Therapy                         expansion  0.10
+```
+
+A consumer thresholds one number instead of guessing which axis matters. See [docs/SPEC.md](docs/SPEC.md#expansion-confidence) for the formula.
 
 ## Built for pipes and agents
 
@@ -37,18 +49,20 @@ $ printf 'ship the OKR review this sprint' | ae -j
     "kind": "expansion",
     "acronym": "OKR",
     "expansion": "Objectives and Key Results",
-    "confidence": 0.5
+    "confidence": 1.0,
+    "source": "user",
+    "verified": true
   }
 ]
 ```
 
-An acronym with several candidate expansions yields several `expansion` findings, each with its own `confidence`; group by `acronym` to rank them. A `candidate` is just `{"kind": "candidate", "acronym": "…"}`; an `extraction` adds `pattern_type`. Each finding carries a single `confidence` — provenance (`validity`) is an internal prior that feeds it, surfaced on the dictionary commands (`list`/`show`) rather than per finding.
+An acronym with several expansions yields several `expansion` findings; group by `acronym` to rank them. Each also carries `source` (`user` or `inline`) and `verified`, so a consumer that only wants human-asserted entries can filter on that. A `candidate` is just `{"kind": "candidate", "acronym": "…"}`; an `extraction` adds the defined `expansion`, its `confidence`, and `pattern_type`. `validity` itself isn't output: it's folded into `confidence`.
 
 Agents and tools hit org-specific acronyms constantly and can't phone a server for them — ae resolves them locally, in-process, in milliseconds.
 
 ## Why local-first
 
-No network calls, ever. The dictionary is a bundled SQLite database
+No network calls beyond fetching the embedding model once (below). The dictionary is a bundled SQLite database
 (`$XDG_DATA_HOME/ae/acronyms.db`); embeddings run locally via a quantized ONNX
 model, with a deterministic hash-embedder fallback so offline builds still work.
 Across concurrent callers, ae elects one in-process **Leader** that holds the
@@ -83,6 +97,14 @@ Full flags and subcommands: `ae --help`. The learned dictionary persists in
 SQLite (`$XDG_DATA_HOME/ae/acronyms.db`); the daemon and the in-process fallback
 share it, so what's learned in one call is there for the next.
 
+### What counts as a mention
+
+A token matches only in acronym casing, with no lowercase letters: `OKR` expands,
+`okr` doesn't, so `us` and `it` never read as `US` and `IT`. Tokens inside an
+identifier or path (`src/OKR/x.rs`, `config.KPI.url`, `foo_KPI`) are skipped. A
+slash between acronym-cased parts is a list, not a path, so `CI/CD` counts as
+`CI` and `CD`.
+
 ### Managing the dictionary
 
 Subcommands curate the dictionary directly (no flags needed — they're distinct
@@ -110,11 +132,11 @@ ae rm --restore                       # restore the most recent backup (or pass 
 `ae stats` says how much of the dictionary is signal:
 
 ```text
-confirmed   9 expansions across 9 acronyms
-verified    7 (78%): 6 built-in defaults, 1 added by you
-inline      2 learned from text, 1 (50%) spelling their acronym
+confirmed   8 expansions across 8 acronyms
+verified    7 (88%): 6 built-in defaults, 1 added by you
+inline      1 learned from text, 1 (100%) spelling their acronym
 mined       1 speculative (ae suggest)
-candidates  2 undefined, 1 being mined for expansions
+candidates  3 undefined, 1 being mined for expansions
 ```
 
 `verified` is what a person asserted (`user` rows); the schema doesn't record
@@ -122,9 +144,9 @@ which of those were seeded, so the built-in count (`builtin` in JSON) is the
 ones still matching the built-in defaults. The inline line's second count
 (`aligned`) is how many inline-learned expansions have initials that spell
 their acronym; a low share means `ae prune` is worth running. `mined` is
-speculation (aligned by construction); the candidates being mined (`watched`)
-are those declared or seen often enough. Shares are rounded to two decimals in JSON (`-j`, or
-`-J` for one line) and are `null` when there's nothing to divide.
+speculation (aligned by construction). The candidates line's second count
+(`watched`) is the watch list, below. Shares are rounded to two decimals in
+JSON (`-j`, or `-J` for one line) and are `null` when there's nothing to divide.
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
 learns; `ae add … -q` adds without printing).
@@ -144,37 +166,27 @@ until `unignore`. That's the difference from `rm`, which deletes outright.
 Fully-capitalized lines are also skipped automatically: with no lowercase to
 contrast against, an all-caps sentence would otherwise flag every short word.
 
-Each acronym has a **provenance**: `declared` (you said it's an acronym, via
-`ae add ACR` with no expansion) or `seen` (ae noticed it). An acronym joins the
-**watch list** once it's declared or has been *seen* enough times (default 3);
-below that it's noise and `ae prune` drops it. A declared acronym is mined
-wherever it's mentioned, even when it's also a word and so never a candidate. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
+Each candidate has a **provenance**: `declared` (you said it's an acronym, via
+`ae add ACR` with no expansion) or `seen` (ae noticed it). It joins the **watch
+list** once it's declared or has been *seen* enough times (default 3). Every
+acronym a text mentions is mined from that text; the watch list matters for a
+declared acronym that is also a word, which is never a candidate but is still
+mined wherever it's written. Punctuated acronyms (`PB&J`, `R&D`, `U.S.A`) are
 detected and mined too (the `&`/`.` maps to a skipped filler word), and a longer
 match wins over its parts (`PB&J` beats `PB`, maximal munch).
-
-`ae prune` also spell-corrects mined expansions against the **system** word list
-(`/usr/share/dict/words`, if present — nothing bundled), so "minimum viabel
-product" converges to "minimum viable product" before dedup.
-
-You rarely need to run it by hand: the same pass runs **automatically** on a
-cadence after a write — at most once per `AE_CONSOLIDATE_SECS` (default daily; a
-negative value disables it). The point is the *quality* half — spell-fix and
-dedup pool evidence and lift confidence — so it's worth running regularly; the
-deletion half is gentle (anything seen within `AE_PRUNE_GRACE_SECS`, default 7
-days, is spared, so an infrequent token has a week to recur before it's
-considered noise). The warm daemon amortizes it across requests.
 
 `ae define MVP` with no expansions picks interactively from the mined
 suggestions — via `fzf` (multi-select) if installed, else a numbered prompt. An
 acronym can hold several expansions, so multi-select is first-class.
 
-`ae prune` is the occasional GC: it merges prefix-duplicate expansions
-("min viable product" → "minimum viable product"), drops ones below a confidence
-floor (default 0.15) or were seen only once, and removes seen-once noise
-candidates. It also drops undeclared candidates that aren't acronyms (an
-ordinary word in caps, a label like `V1`), however often seen, with what was
-mined for them. `ae suggest` keeps
-a higher bar by default (0.30) since speculation is noisy; both take
+`ae prune` is the GC. For speculation, it spell-corrects mined expansions
+against the **system** word list (`/usr/share/dict/words`, if present — nothing
+bundled), merges prefix- and near-duplicates ("min viabel product" → "minimum
+viable product"), and drops ones below a confidence floor (default 0.15) or
+seen only once. For candidates, it removes undeclared ones seen only once, and
+undeclared ones that aren't acronyms (an ordinary word in caps, a label like
+`V1`) however often seen, with what was mined for them. `ae suggest` keeps a
+higher bar by default (0.30) since speculation is noisy; both take
 `--min-confidence` to override, and `suggest` takes `-l/--limit N`.
 
 `ae prune` also brings confirmed entries an older `ae` wrote up to the current
@@ -182,9 +194,15 @@ rules, keeping the good ones: it drops inline-learned definitions whose initials
 don't spell their acronym (`ae stats` counts them as not `aligned`) and merges
 expansions that differ only in case (your entry wins over an inline one;
 otherwise the older casing stands). These are dictionary entries, so when there's
-any to change it backs up first, like `rm --all`; the JSON reports
-`unaligned_removed`, `case_duplicates_merged` and `backup`. The automatic pass
-never touches confirmed entries.
+any to change it backs up first, like `rm --all`. The JSON reports each count,
+plus `backup`.
+
+You rarely need to run `prune` by hand: the speculation and candidate half runs
+**automatically** on a cadence after a write — at most once per
+`AE_CONSOLIDATE_SECS` (default daily; a negative value disables it). The
+deletion is gentle: anything seen within `AE_PRUNE_GRACE_SECS` (default 7 days)
+is spared, so an infrequent token has a week to recur before it's considered
+noise. The automatic pass never touches confirmed entries.
 
 `ae suggest` is the payoff of tracking candidates. When `ae` analyzes text that
 mentions an acronym, it mines word-sequences in that same text whose initials

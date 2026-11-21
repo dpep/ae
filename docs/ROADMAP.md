@@ -55,7 +55,7 @@ commit.
 - [x] model fetched on first use from the HuggingFace Hub into the shared
       `~/.cache/huggingface/hub` (via `hf-hub`), never committed and never
       fetched at build time; resolution is `$AE_MODEL_DIR` → Hub → hash fallback
-- [x] `--model <path|name>` override; resolution order, named search dirs
+- [x] `--model <dir | .onnx | org/name>` override (a local path, or a Hub repo id)
 - [x] tests: trie insert/scan, mean-pool, model resolution, real-model semantic
       similarity (gated on model presence)
 
@@ -115,16 +115,23 @@ commit.
       `expansions`/`expansion`, `extractions`/`extraction`,
       `candidates`/`candidate`
 - [x] candidate detection — acronym-shaped tokens (`[A-Z][A-Z0-9]{1,5}`) that are
-      neither expanded nor extracted are surfaced in `payload.candidates`
+      neither expanded nor extracted are surfaced in `payload.candidates`,
+      minus tokens `noise::is_noise` rejects (words in caps per the system
+      wordlist and their inflections, numbered labels like `V1`/`FY27`, log
+      levels and code annotations; a short list of common acronyms is exempt)
+- [x] mention rules (SPEC § Matching) — acronym casing only; identifier and
+      path tokens skipped; slash-joined acronym lists (`CI/CD`) split into parts
 
 ## Dictionary management
 
-- [x] `ae list` / `show <ACR>` / `search <QUERY>` / `add <ACR> <EXP>` /
-      `candidates` subcommands (no flags; `-j/-J` honored). Operate on the
+- [x] `ae list` / `show <ACR>` / `add <ACR> <EXP>` / `candidates` subcommands (no flags; `-j/-J` honored). Operate on the
       `--db` store directly. Note: a running daemon needs `--stop` to pick up
       manual edits (its in-memory trie is hydrated at start)
-- [x] `ae rm <ACR> [substring] [--all]` — removes the only expansion, or one
-      picked by substring; refuses (and lists) when ambiguous; `--all` removes all
+- [x] `ae rm <ACR> [expansion] [--all]` — removes the only expansion, or the
+      one named (exact, then unique ignoring case, then substring); refuses (and
+      lists) when ambiguous; `--all` removes all
+- [x] `ae rm [ACR] --unverified` — drop every non-`user` expansion; across the
+      whole dictionary it backs up first, like `rm --all`
 - [x] `ae rm --all` (no acronym) / `ae rm --restore [PATH]` — wipe the whole
       dictionary (factory reset: built-in defaults re-seed) and recover it.
       Instead of a confirmation prompt, the wipe first writes a timestamped
@@ -143,14 +150,12 @@ commit.
       defining an acronym clears it. Surfaced via `ae candidates`. An all-caps
       line (no lowercase contrast) surfaces no candidates — casing carries no
       acronym signal there, so it isn't treated as a flood of them
-- [x] speculative expansion mining — when a candidate appears in text, scan the
-      same text for consecutive word-sequences whose initials spell it (no
-      parens) and count recurrences (`potential_expansions`); `ae suggest [ACR]`
-      ranks them with confidence (share of the acronym's sightings). Defining an
-      acronym clears its suggestions. A *same-sentence* hit (the acronym token
-      co-occurs with the phrase that spells it) is credited maximal coherence, so
-      it outranks cross-text guesses — but stays speculative, not a confident
-      extraction (a non-parenthetical match is too noisy to auto-define)
+- [x] speculative expansion mining — a text is scanned for word-sequences whose
+      initials spell an acronym it mentions (no parens), stored as `mined` rows
+      with recurrence counts; `ae suggest [ACR]` ranks them with confidence
+      (share of the acronym's sightings). Defining an acronym clears its
+      suggestions. A match stays speculative, never auto-defined: a
+      non-parenthetical match is too noisy (SPEC § Mining)
 
 - [x] filler-tolerant mining — match the acronym as a subsequence over words,
       skipping a closed set of fillers (OKR = Objectives *and* Key Results) yet
@@ -170,8 +175,15 @@ commit.
 - [x] prefix-normalization dedup — `ae prune` merges prefix-compatible
       expansions ("min" ≈ "minimum", ≥3-char guard) into the fullest form,
       summing counts/coherence
-- [x] `--min-confidence` (default 0.15) on `suggest`; `ae prune` drops below it
-      and removes seen-once noise candidates
+- [x] `--min-confidence` on `prune` (default 0.15) drops mined rows below it;
+      prune also removes seen-once noise candidates
+- [x] inline definitions are confirmed only when aligned (SPEC § Expansion
+      confidence); unaligned ones are reported, never stored
+- [x] case-only siblings fold on add (ASCII case, via `COLLATE NOCASE`)
+- [x] `ae prune` brings legacy confirmed rows up to current rules (drops
+      unaligned `inline` rows, merges case-only duplicates), backing up first;
+      the automatic pass leaves confirmed rows alone
+- [x] `ae stats` — dictionary health from counts (SPEC § Milestone 1)
 
 ## CLI consolidation
 
@@ -194,10 +206,12 @@ it's the per-*acronym* "is-this-an-acronym" signal, a different entity.
 The three scores are explicit:
 1. **is-acronym** — candidate detection (shape) + `candidate_acronyms` frequency.
 2. **expansion-validity** — `source_validity()`: user 1.0, inline 0.9, mined =
-   the recurrence+coherence confidence. Surfaced as `validity` on a match and
-   `verified`/`source` in `list`/`show`.
-3. **contextual-likelihood** — `Engine::contextual()`: cosine of the sentence
-   against the expansion's recorded contexts. Surfaced as `confidence`.
+   the recurrence+coherence confidence. Internal (`ExpansionResult::validity`);
+   `source`/`verified` are surfaced on expansion findings and in `list`/`show`.
+3. **contextual-likelihood** — `Engine::fit` (best cosine of the sentence
+   against an expansion's recorded contexts), turned into a probability over
+   siblings by `fit_shares`. Surfaced as `confidence = validity × share`
+   (SPEC § Expansion confidence).
 
 Views over the one table: `list`/`show` = confirmed (`user`/`inline`); `suggest`
 = `mined`; the trie hydrates from confirmed only (a mined-only acronym stays a
@@ -216,18 +230,19 @@ candidate).
 
 ### Candidate provenance & the watch list
 
-- [x] provenance `declared` (via `ae watch` or `ae add ACR` with no expansion)
-      vs `seen` (auto-detected). An acronym joins the **watch list** (cross-text
-      mining) once declared or seen `count` >= `WATCH_THRESHOLD` (3); `prune`
-      keeps declared candidates, drops seldom-seen `seen` ones
+- [x] provenance `declared` (via `ae add ACR` with no expansion) vs `seen`
+      (auto-detected). An acronym joins the **watch list** once declared or seen
+      `count` >= `WATCH_THRESHOLD` (3); a watched acronym written in a text is
+      mined even when it isn't a candidate. `prune` keeps declared candidates,
+      drops seen-once `seen` ones
 - [x] `ae candidates` shows provenance (`declared`/`seen`) + watch state
 - [x] consolidation = the unified `Store::consolidate` (spell-fix + dedup →
       quality; drop low-conf + clear noise → cleanup), shared by `ae prune` and
       the auto-job. Cadence-gated (`AE_CONSOLIDATE_SECS`, default daily; negative
       disables) via a `meta` table, so dedup/spell run regularly to lift
       confidence; runs in-process and in the warm daemon
-- [x] prune grace — a candidate seen within `AE_PRUNE_GRACE_SECS` (default ~30
-      days, low volume → patient; `0` = immediate) is spared, so an infrequent
+- [x] prune grace — a candidate seen within `AE_PRUNE_GRACE_SECS` (default 7
+      days; `0` = immediate) is spared, so an infrequent
       token isn't yanked before it can recur weeks later. Same grace gates the
       low-confidence drop of *mined* expansions (`recent_potentials`), and
       `dedup_potentials` keeps the newest `last_seen` so merging doesn't reset age
@@ -246,14 +261,13 @@ candidate).
       (`PB&J` → `PBJ`); one DFS walk of the text emits every acronym it spells
       (filler-tolerant via consume/skip branching, precision guard intact),
       replacing the per-acronym rescan. O(text) per analysis, not O(acronyms×text)
-- [x] cache the base mining trie (watch list ∪ known) in the `Engine`, keyed on a
-      cheap `(known, watch-list)` count signature — rebuilt only when it changes
-      (which also catches out-of-band `add`/`rm`/`watch` edits) or ages past a
-      5-min backstop. Per-request candidates use a tiny separate trie. Persists
-      across the warm daemon's requests; the one-shot path builds it once
+- [x] cache the expansion trie and watch list in the `Engine`, keyed on a cheap
+      `(known, watch-list, ignored)` count signature — rebuilt only when it
+      changes (which also catches out-of-band `add`/`rm` edits) or ages past a
+      backstop. The mining trie is built per text from the acronyms it mentions
 - [ ] cap/dedup `acronym_contexts` rows — mining a recurrence of a known
       expansion appends a context embedding every time (`add_context`), so the
-      table grows unbounded for frequently-seen acronyms and `Engine::contextual`
+      table grows unbounded for frequently-seen acronyms and `Engine::fit`
       scans all of them. Keep a running mean or cap
       to the most recent/representative N, folded into consolidation
 - [ ] fzf preview pane showing where each candidate/phrase was seen
@@ -262,7 +276,6 @@ candidate).
 
 - [ ] `vec0` virtual-table storage when `sqlite-vec` is available.
 - [ ] Bump `MRL_DIMS` to 128 (better disambiguation for the non-MRL model).
-- [ ] `ae --add ACR "Expansion"` to seed the dictionary from the CLI.
 - [ ] Confidence calibration for learned candidates from real corpora.
 - [ ] Homebrew: validate the formula's ONNX-Runtime (load-dynamic) build and
       first-run model fetch on a clean machine (sandbox network constraints).
