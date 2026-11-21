@@ -173,24 +173,31 @@ impl Engine {
                 continue; // muted, a longer acronym covers it, or already handled
             }
 
-            let mut matches: Vec<MatchCandidate> = self
-                .store
-                .expansions_for(&acronym)?
+            let entries = self.store.expansions_for(&acronym)?;
+            // A sole expansion has nothing to disambiguate — skip the inference.
+            let fits = if entries.len() > 1 {
+                entries
+                    .iter()
+                    .map(|(id, expansion, _)| self.fit(*id, expansion, query_vec))
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            } else {
+                vec![0.0; entries.len()]
+            };
+            let mut matches: Vec<MatchCandidate> = entries
                 .into_iter()
-                .map(|(id, expansion, source)| {
-                    Ok(MatchCandidate {
-                        expansion,
-                        validity: crate::store::source_validity(&source),
-                        confidence: self.contextual(id, query_vec)?,
-                        source,
-                    })
+                .zip(fit_shares(&fits))
+                .map(|((_, expansion, source), share)| MatchCandidate {
+                    expansion,
+                    validity: crate::store::source_validity(&source),
+                    confidence: share,
+                    source,
                 })
-                .collect::<rusqlite::Result<_>>()?;
+                .collect();
 
-            // Best fit for *this* context first, then most-valid.
+            // Rank by the exposed score (validity × share), validity breaking ties.
             matches.sort_by(|a, b| {
-                b.confidence
-                    .total_cmp(&a.confidence)
+                (b.validity * b.confidence)
+                    .total_cmp(&(a.validity * a.confidence))
                     .then(b.validity.total_cmp(&a.validity))
             });
 
@@ -205,21 +212,21 @@ impl Engine {
         Ok(results)
     }
 
-    /// Contextual likelihood for one expansion: how well the query sentence
-    /// matches the expansion's recorded contexts (`0.5` — neutral — with no
-    /// evidence yet). This is P(expansion | acronym, context), distinct from
-    /// validity.
-    fn contextual(&self, id: i64, query_vec: &QueryVec) -> rusqlite::Result<f32> {
+    /// Raw contextual fit for one expansion: the best cosine between the query
+    /// and its recorded contexts. With none recorded, it's scored against its
+    /// own phrase — the very vector its first context would hold — so a
+    /// verified entry nobody has seen in the wild isn't penalized against a
+    /// mined sibling. Only meaningful relative to siblings (see [`fit_shares`]).
+    fn fit(&self, id: i64, expansion: &str, query_vec: &QueryVec) -> rusqlite::Result<f32> {
         let contexts = self.store.contexts_for(id)?;
         if contexts.is_empty() {
-            return Ok(0.5);
+            let own = compress_matryoshka_vector(&self.embedder.embed(expansion));
+            return Ok(cosine_similarity(query_vec.get(), &own));
         }
-        let best = contexts
+        Ok(contexts
             .iter()
             .map(|c| cosine_similarity(query_vec.get(), c))
-            .fold(0.0_f32, f32::max)
-            .clamp(0.0, 1.0);
-        Ok(best)
+            .fold(f32::NEG_INFINITY, f32::max))
     }
 
     /// Stage 2 — extract inline definitions, persist them (dictionary + trie +
@@ -417,6 +424,25 @@ impl Engine {
             None => 1.0,
         })
     }
+}
+
+/// Softmax temperature over sibling fits, in cosine units: a sibling that fits
+/// the context 0.1 better is e (≈2.7×) times as likely. Raw cosines from a
+/// small embedding model sit in a narrow band, so they can't be read as
+/// probabilities directly; this is the scale that turns their gaps into odds.
+const FIT_TEMPERATURE: f32 = 0.1;
+
+/// P(expansion | acronym, context) for each sibling: a softmax over their raw
+/// fits, so the shares sum to 1. A sole expansion gets 1.0; siblings that fit
+/// equally well split evenly.
+fn fit_shares(fits: &[f32]) -> Vec<f32> {
+    let best = fits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let weights: Vec<f32> = fits
+        .iter()
+        .map(|f| ((f - best) / FIT_TEMPERATURE).exp())
+        .collect();
+    let total: f32 = weights.iter().sum();
+    weights.iter().map(|w| w / total).collect()
 }
 
 /// Whether an acronym is long enough to mine. Two letters match nearly any
@@ -854,21 +880,23 @@ mod tests {
         // for a confirmed expansion, so re-analyzing the same sentence scored it
         // against a stored copy of itself → cosine 1.0 (and made a warm daemon
         // disagree with a fresh engine). Confidence must stay stable, not jump
-        // to a self-match on the second identical pass.
+        // to a self-match on the second identical pass. Checked on the raw fit:
+        // a sole expansion's share is 1.0 by definition, whatever its contexts.
         let e = Engine::in_memory().unwrap();
         let text = "check TPS (Test Procedure Spec) for the run";
-        let conf = |p: &AnalysisPayload| {
-            p.expansions
-                .iter()
-                .find(|r| r.acronym == "TPS")
-                .map(|r| r.matches[0].confidence)
+        let fit = || {
+            let (id, expansion, _) = e.store.expansions_for("TPS").unwrap().remove(0);
+            e.fit(id, &expansion, &QueryVec::new(e.embedder.as_ref(), text))
+                .unwrap()
         };
-        let c1 = conf(&e.analyze(text).unwrap());
-        let c2 = conf(&e.analyze(text).unwrap()).expect("TPS known on second pass");
-        assert!(c2 < 1.0, "self-contaminated confidence: {c2}");
-        if let Some(c1) = c1 {
-            assert!((c1 - c2).abs() < 0.2, "confidence drifted: {c1} vs {c2}");
-        }
+        e.analyze(text).unwrap();
+        let f1 = fit();
+        e.analyze(text).unwrap();
+        e.analyze(text).unwrap();
+        let f2 = fit();
+        assert!(f2 < 0.99, "self-contaminated fit: {f2}");
+        assert!(f2 > 0.0, "a zero query vector would make this vacuous");
+        assert!((f1 - f2).abs() < 1e-6, "fit drifted: {f1} vs {f2}");
     }
 
     #[test]
@@ -1391,5 +1419,133 @@ mod tests {
         let out = e.analyze("we track our daily output here").unwrap();
         assert!(out.candidates.is_empty());
         assert!(!e.potentials_for("TODO").unwrap().is_empty());
+    }
+
+    // --- Match confidence: P(expansion | acronym, context) × validity ---
+
+    /// A transparent embedder for scoring tests: "physical"/"therapy" and
+    /// "part"/"time" each own a dimension, every other word shares a third.
+    struct KeywordEmbedder;
+
+    impl Embedder for KeywordEmbedder {
+        fn embed(&self, text: &str) -> Vec<f32> {
+            let mut v = vec![0.0; crate::embed::EMBED_DIMS];
+            for word in text
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+            {
+                let dim = match word.to_lowercase().as_str() {
+                    "physical" | "therapy" => 0,
+                    "part" | "time" => 1,
+                    _ => 2,
+                };
+                v[dim] += 1.0;
+            }
+            v
+        }
+
+        fn kind(&self) -> &'static str {
+            "keyword"
+        }
+    }
+
+    /// An engine over an empty store holding just `entries`, all verified.
+    fn engine_with(entries: &[(&str, &str)]) -> Engine {
+        let store = Store::open_in_memory().unwrap();
+        for (acronym, expansion) in entries {
+            store.add_entry(acronym, expansion, "user").unwrap();
+        }
+        Engine::new(store, Box::new(KeywordEmbedder)).unwrap()
+    }
+
+    fn matches_for(e: &Engine, text: &str, acronym: &str) -> Vec<MatchCandidate> {
+        e.expand_only(text)
+            .unwrap()
+            .expansions
+            .into_iter()
+            .find(|r| r.acronym == acronym)
+            .map(|r| r.matches)
+            .unwrap_or_default()
+    }
+
+    /// The exposed (finding) confidence of each expansion of `acronym`.
+    fn exposed_for(e: &Engine, text: &str, acronym: &str) -> Vec<f32> {
+        e.expand_only(text)
+            .unwrap()
+            .findings()
+            .into_iter()
+            .filter(|f| f.kind == "expansion" && f.acronym == acronym)
+            .filter_map(|f| f.confidence)
+            .collect()
+    }
+
+    #[test]
+    fn a_verified_sole_expansion_is_fully_confident() {
+        let e = engine_with(&[("SLO", "Service Level Objective")]);
+        assert_eq!(exposed_for(&e, "is the SLO burning down", "SLO"), [1.0]);
+    }
+
+    #[test]
+    fn an_inline_sole_expansion_scores_its_validity() {
+        let e = Engine::in_memory().unwrap();
+        e.analyze("The ZQ (Zebra Queue) is deep.").unwrap();
+        assert_eq!(exposed_for(&e, "Drain the ZQ now.", "ZQ"), [0.9]);
+    }
+
+    #[test]
+    fn a_sole_expansion_needs_no_inference() {
+        let (e, calls) = counting_engine();
+        e.expand_only("Check the OKR dashboard.").unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn sibling_confidences_form_a_distribution() {
+        let e = engine_with(&[("PT", "Part Time"), ("PT", "Physical Therapy")]);
+        let matches = matches_for(&e, "the PT plan", "PT");
+        let total: f32 = matches.iter().map(|m| m.confidence).sum();
+        assert!((total - 1.0).abs() < 1e-4, "shares sum to {total}");
+        let exposed: f32 = exposed_for(&e, "the PT plan", "PT").iter().sum();
+        assert!((exposed - 1.0).abs() <= 0.02, "exposed sum {exposed}");
+    }
+
+    #[test]
+    fn the_sibling_that_fits_the_context_ranks_first() {
+        let e = engine_with(&[("PT", "Part Time"), ("PT", "Physical Therapy")]);
+        for (text, want) in [
+            (
+                "booked physical therapy for my knee, PT at noon",
+                "Physical Therapy",
+            ),
+            ("the PT role is part time hours", "Part Time"),
+        ] {
+            let m = matches_for(&e, text, "PT");
+            assert_eq!(m[0].expansion, want, "{text}");
+            assert!(m[0].confidence > 0.5, "{text}: {}", m[0].confidence);
+        }
+    }
+
+    #[test]
+    fn a_sibling_without_contexts_is_not_penalized() {
+        // No recorded context reads the same as the first one it would record:
+        // an embedding of its own phrase.
+        let e = engine_with(&[("PT", "Part Time"), ("PT", "Physical Therapy")]);
+        let text = "physical PT plan";
+        let before: Vec<f32> = matches_for(&e, text, "PT")
+            .iter()
+            .map(|m| m.confidence)
+            .collect();
+        let (id, phrase, _) = e.store.expansions_for("PT").unwrap().remove(1);
+        e.store
+            .add_context(id, &compress_matryoshka_vector(&e.embedder.embed(&phrase)))
+            .unwrap();
+        let after: Vec<f32> = matches_for(&e, text, "PT")
+            .iter()
+            .map(|m| m.confidence)
+            .collect();
+        assert_eq!(before.len(), 2);
+        for (b, a) in before.iter().zip(&after) {
+            assert!((b - a).abs() < 1e-6, "{before:?} vs {after:?}");
+        }
     }
 }

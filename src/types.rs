@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// One candidate expansion for a known acronym. Two scores: `validity` —
 /// P(this is a real expansion of the acronym) — and `confidence` — P(it's the
-/// meaning *here*, from how well the context fits).
+/// meaning *here*): its share of the contextual fit among the acronym's
+/// expansions, so siblings sum to 1 and a sole expansion is 1.0.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct MatchCandidate {
     pub expansion: String,
@@ -134,10 +135,10 @@ impl AnalysisPayload {
                     kind: "expansion".into(),
                     acronym: e.acronym.clone(),
                     expansion: Some(m.expansion.clone()),
-                    // The single exposed trust score = provenance prior
-                    // (validity) folded into contextual fit. validity stays an
-                    // internal ranking/diagnostic field, not a second output.
-                    confidence: Some(m.validity * m.confidence),
+                    // The single exposed trust score: P(meaning here) discounted
+                    // by provenance. Built from a few cosines, so two decimals
+                    // is all the precision it has.
+                    confidence: Some((m.validity * m.confidence * 100.0).round() / 100.0),
                     pattern_type: None,
                     source: Some(m.source.clone()),
                     verified: Some(m.source == "user"),
@@ -167,5 +168,28 @@ impl AnalysisPayload {
             });
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exposed_confidence_is_rounded_to_two_decimals() {
+        let payload = AnalysisPayload {
+            expansions: vec![ExpansionResult {
+                acronym: "KPI".into(),
+                text_slice: "KPI".into(),
+                matches: vec![MatchCandidate {
+                    expansion: "Key Performance Indicator".into(),
+                    validity: 0.9,
+                    confidence: 0.333_333,
+                    source: "inline".into(),
+                }],
+            }],
+            ..AnalysisPayload::empty("KPI")
+        };
+        assert_eq!(payload.findings()[0].confidence, Some(0.3));
     }
 }

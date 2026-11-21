@@ -79,6 +79,30 @@ server thread automatically.
        └───────────────────────────┘
 ```
 
+## Expansion confidence
+
+An expansion finding's `confidence` is the probability that this expansion is
+what the acronym means here, discounted by how far its provenance can be
+trusted:
+
+```text
+confidence = validity × share          rounded to 2 decimals
+share_i    = softmax_i(fit / 0.1)      over the acronym's confirmed expansions
+fit_i      = max cosine(query, context) over expansion i's recorded contexts,
+             or cosine(query, embed(expansion i)) when it has none
+```
+
+- **validity**: provenance prior, `user` 1.0, `inline` 0.9.
+- **share**: P(expansion | acronym, context). Shares across an acronym's
+  expansions sum to 1. A sole expansion has nothing to disambiguate, so its
+  share is 1.0 and its confidence equals its validity (verified 1.0, inline
+  0.9). Raw cosines aren't probabilities; the temperature (0.1) reads a 0.1
+  cosine lead as e:1 odds.
+- An expansion with no recorded context is scored against its own phrase, the
+  same vector its first context would hold, so it is neither favoured nor
+  penalized against siblings that have one.
+- Matches are ranked by confidence, with validity breaking ties.
+
 ## Milestones
 
 ### Milestone 1: CLI Configuration, Target Stream Isolation, & Piping

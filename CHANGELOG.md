@@ -34,6 +34,15 @@ releases are grouped at the end.
   `ae rm ACR <exact expansion>`.
 - `rm`'s JSON status now always carries `backup` (a path, or `null`), and
   `acronym` is `null` for a removal spanning every acronym.
+- An expansion's `confidence` is now the probability it's the meaning here:
+  its share of the contextual fit among the acronym's expansions, times its
+  provenance validity, rounded to two decimals. An acronym with one expansion
+  scores its validity (1.0 verified, 0.9 inline); siblings split the
+  probability between them. It used to be the raw similarity between the
+  prompt and the expansion's own words, which sat near zero for most prompts.
+  A consumer gating on `confidence` should re-tune its threshold. Junk siblings
+  now dilute a verified expansion's share, so clear them (`ae rm`) to let
+  verified entries score high.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
