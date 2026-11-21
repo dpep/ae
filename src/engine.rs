@@ -5,7 +5,7 @@
 //! [`AnalysisPayload`]. The Leader holds one of these for the process lifetime;
 //! the fallback path builds an ephemeral one per invocation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,10 @@ pub struct Engine {
     /// Rebuilt only when the signature changes (or it ages out) — cheap to reuse
     /// across the many requests a warm daemon serves.
     dictionary_cache: Mutex<Option<DictionaryCache>>,
+    /// Compressed embeddings of expansion phrases, scored for siblings with no
+    /// recorded context. A phrase's embedding never changes, and the set is
+    /// bounded by the confirmed dictionary.
+    phrase_vecs: Mutex<HashMap<String, Vec<f32>>>,
 }
 
 impl Engine {
@@ -79,6 +83,7 @@ impl Engine {
             trie,
             embedder,
             dictionary_cache: Mutex::new(None),
+            phrase_vecs: Mutex::new(HashMap::new()),
         })
     }
 
@@ -240,8 +245,18 @@ impl Engine {
     fn fit(&self, id: i64, expansion: &str, query_vec: &QueryVec) -> rusqlite::Result<f32> {
         let contexts = self.store.contexts_for(id)?;
         if contexts.is_empty() {
+            let query = query_vec.get();
+            if let Some(own) = self.phrase_vecs.lock().unwrap().get(expansion) {
+                return Ok(cosine_similarity(query, own));
+            }
+            // Embed off-lock so a slow inference doesn't block other requests.
             let own = compress_matryoshka_vector(&self.embedder.embed(expansion));
-            return Ok(cosine_similarity(query_vec.get(), &own));
+            let fit = cosine_similarity(query, &own);
+            self.phrase_vecs
+                .lock()
+                .unwrap()
+                .insert(expansion.to_string(), own);
+            return Ok(fit);
         }
         Ok(contexts
             .iter()
@@ -412,10 +427,12 @@ impl Engine {
 }
 
 /// Softmax temperature over sibling fits, in cosine units: a sibling that fits
-/// the context 0.1 better is e (≈2.7×) times as likely. Raw cosines from a
+/// the context 0.15 better is e (≈2.7×) times as likely. Raw cosines from a
 /// small embedding model sit in a narrow band, so they can't be read as
 /// probabilities directly; this is the scale that turns their gaps into odds.
-const FIT_TEMPERATURE: f32 = 0.1;
+/// Fitted by likelihood on labeled ambiguous prompts, where it makes the mean
+/// top confidence match how often the top pick is right; 0.1 overstated it.
+const FIT_TEMPERATURE: f32 = 0.15;
 
 /// P(expansion | acronym, context) for each sibling: a softmax over their raw
 /// fits, so the shares sum to 1. A sole expansion gets 1.0; siblings that fit
@@ -1361,6 +1378,19 @@ mod tests {
         let (e, calls) = counting_engine();
         e.expand_only("Check the OKR dashboard.").unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_sibling_phrase_is_embedded_once() {
+        let (e, calls) = counting_engine();
+        e.store.add_entry("ZQ", "Zebra Queue", "user").unwrap();
+        e.store.add_entry("ZQ", "Zone Quota", "user").unwrap();
+        e.expand_only("drain the ZQ").unwrap();
+        // The query, plus each context-less sibling's own phrase.
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        e.expand_only("drain the ZQ again").unwrap();
+        // Only the new query: the phrases' embeddings don't change.
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
     }
 
     #[test]

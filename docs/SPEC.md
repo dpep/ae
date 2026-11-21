@@ -105,7 +105,7 @@ trusted:
 
 ```text
 confidence = validity × share          rounded to 2 decimals
-share_i    = softmax_i(fit / 0.1)      over the acronym's confirmed expansions
+share_i    = softmax_i(fit / 0.15)     over the acronym's confirmed expansions
 fit_i      = max cosine(query, context) over expansion i's recorded contexts,
              or cosine(query, embed(expansion i)) when it has none
 ```
@@ -114,7 +114,7 @@ fit_i      = max cosine(query, context) over expansion i's recorded contexts,
 - **share**: P(expansion | acronym, context). Shares across an acronym's
   expansions sum to 1. A sole expansion has nothing to disambiguate, so its
   share is 1.0 and its confidence equals its validity (verified 1.0, inline
-  0.9). Raw cosines aren't probabilities; the temperature (0.1) reads a 0.1
+  0.9). Raw cosines aren't probabilities; the temperature (0.15) reads a 0.15
   cosine lead as e:1 odds.
 - An expansion with no recorded context is scored against its own phrase, the
   same vector its first context would hold, so it is neither favoured nor

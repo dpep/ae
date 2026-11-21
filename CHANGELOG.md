@@ -104,6 +104,12 @@ releases are grouped at the end.
   already in your dictionary are mostly such coincidences: run
   `ae rm --unverified` to drop them (it also drops inline-learned rows; see
   above), or let `ae prune` age out the ones seen once.
+- Confidence between sibling expansions is less extreme: a 0.15 cosine lead
+  is now e:1 odds, not 0.1, which on labeled ambiguous prompts makes the top
+  pick's confidence match how often it is right. A consumer gating on
+  `confidence` for an acronym with several meanings may see slightly lower
+  scores. Scoring a sibling with no stored context no longer re-runs the model
+  for its phrase on every hit.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
