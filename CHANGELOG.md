@@ -8,116 +8,87 @@ what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
 ## Unreleased
-- Candidates skip tokens that aren't acronyms: an ordinary word in caps
-  (`WHERE`, `NOT`, `POST`, `WARN` — checked against the system wordlist, when
-  one is installed), a numbered label (`V1`, `L4`, `Q1`, `H1`, `P0`, `FY27`),
-  and `INFO`/`DEBUG`/`TODO`/`FIXME`. A real acronym that is also a word (`REST`,
-  `CAT`) is no longer surfaced as a candidate; define it with `ae add`,
-  or `ae add` it with no expansion to keep mining for one. Junk candidates
-  already recorded are cleared by `ae prune` (below).
-- `ae rm ACR <expansion>` prefers an exact match: `ae rm PP "Partner Platform"`
-  no longer refuses because "Agent and Partner Platform" also contains it, and
-  `ae rm BK buildkite` picks that exact casing over "Buildkite". Failing an
-  exact match, a unique match ignoring case is used, then the old substring rule.
-- `ae rm ACR --unverified` drops every expansion of ACR you didn't add yourself
-  (inline-learned and speculative mined rows), keeping `user` ones. With no
-  acronym it does that across the whole dictionary, backing it up first. If inline learning has filled your dictionary with junk, run
-  `ae rm --unverified` to keep only what you added (and the built-in defaults);
-  `ae rm --restore` undoes it.
-- Expansions that differ only in case are now one row: learning or adding
-  `buildkite` next to an existing `Buildkite` no longer creates a sibling. The
-  existing row keeps its casing unless a stronger source arrives — `ae add`
-  over an inline-learned row upgrades it to yours, casing included. Siblings
-  already in your dictionary stay; remove the one you don't want with
-  `ae rm ACR <exact expansion>`.
-- `rm`'s JSON status now always carries `backup` (a path, or `null`), and
-  `acronym` is `null` for a removal spanning every acronym.
-- An expansion's `confidence` is now the probability it's the meaning here:
-  its share of the contextual fit among the acronym's expansions, times its
-  provenance validity, rounded to two decimals. An acronym with one expansion
-  scores its validity (1.0 verified, 0.9 inline); siblings split the
-  probability between them. It used to be the raw similarity between the
-  prompt and the expansion's own words, which sat near zero for most prompts.
-  A consumer gating on `confidence` should re-tune its threshold. Junk siblings
-  now dilute a verified expansion's share. Run `ae rm --unverified` (or
-  `ae rm ACR --unverified`) to clear them and let verified entries score high.
-- An inline definition is added to the dictionary only when its initials spell
-  the acronym (`KPI (Key Performance Indicator)`). Others, which were mostly
-  sentence fragments and names, still show up as extractions but go to
-  `ae suggest` as speculation, and their acronym stays a candidate. Unaligned
-  entries learned before this change remain in the dictionary as `inline`.
-  `ae rm --unverified` clears them.
-- Without the embedding model (offline, not yet cached), context now counts:
-  the built-in fallback used to drop most words before comparing, so siblings
-  split confidence evenly whatever the prompt said. Nothing to do. Contexts
-  stored offline before this change still match, just more weakly, and fill
-  in as `ae` sees the acronym again.
-- `ae prune` (and the periodic auto-prune) now drops recorded candidates that
-  aren't acronyms by the new candidate rule, however often they were seen,
-  along with the expansions mined for them. Run `ae prune` once to clear the `WHERE`,
-  `NOT`, `TODO` and `V1` already on your candidate list. Acronyms you declared
-  with a bare `ae add` are kept. Its JSON gains `non_acronyms_removed` and
-  `non_acronym_expansions_removed`.
-- `ae stats` reports how much of the dictionary is signal: confirmed
-  expansions and acronyms, how many are verified (and how many of those are
-  the built-in defaults), how many inline-learned ones spell their acronym,
-  and the mined and candidate counts. Shares come from those counts, rounded
-  to two decimals.
-- `rm` backups now live beside the database they protect, in
-  `backups/<db name>-<timestamp>.db` (for the default dictionary,
-  `~/.local/share/ae/backups/`), readable only by you, keeping the newest 10.
-  They used to share `/tmp/ae` across every database, so a bare
-  `ae rm --restore` could restore another dictionary's backup over yours, and
-  a reboot deleted them. A bare `--restore` now only considers this
-  database's backups. Older backups stay in `/tmp/ae`; restore one by passing
-  its path (`ae rm --restore /tmp/ae/backup_….db`). A bulk remove that would
-  remove nothing no longer takes a backup.
-- `ae prune` now brings dictionary entries an older `ae` learned up to the
-  current rules, keeping the good ones: it drops inline definitions whose
-  initials don't spell their acronym, and merges confirmed expansions that
-  differ only in case (yours over an inline one, else the older casing). Run
-  `ae prune` once instead of `ae rm --unverified` to clear inline junk without
-  losing the inline definitions that are right. It backs up first when it
-  changes any entries. Its JSON gains `unaligned_removed`,
-  `case_duplicates_merged` and `backup`. The automatic pass doesn't do this.
-- The candidate word rule also catches inflections the system wordlist lacks
-  (`FAILED`, `VALUES`, `MOVED`, `FIELDS`), keeping acronyms like `AWS`, `CORS`
-  and `SAAS` whose stripped form would be a short word. `AI`, `IDE`, `ISO`,
-  `ROI`, `ETA` and `SLA` are exempt and stay candidates: their word senses are
-  too obscure to be what caps text means. `ae prune` clears the inflected words
-  already on your candidate list.
-- Piping `ae` into a reader that stops early (`ae candidates | head`) exits
-  quietly with success instead of printing "render failed: Broken pipe" (or a
-  JSON error) and failing.
-- A known acronym expands only when written in acronym casing: `us`, `it`
-  and `It` no longer expand as `US` and `IT`, and a mention inside an
-  identifier or path (`src/ID/x.rs`, `config.ID.url`, `foo_ID`) is skipped.
-  `ae "look at the okr"` no longer expands; write `OKR`. Nothing to do.
-- Inline definitions in camel case now count as spelling their acronym:
-  `JSON (JavaScript Object Notation)` and `GitHub (GH)` are learned, and
-  `ae prune` keeps such rows already in your dictionary. One that
-  doesn't spell its acronym is reported as an extraction and nothing more; it
-  is not kept for `ae suggest` either. Nothing to do.
-- Expansions are mined only from text that mentions the acronym. Mining a
-  watched acronym from any text whose initials happened to spell it
-  (`UTF: use the foo`) made nearly all of `ae suggest`'s list. A declared
-  acronym is now mined where it's written, not everywhere. Mined rows
-  already in your dictionary are mostly such coincidences: run
-  `ae rm --unverified` to drop them (it also drops inline-learned rows; see
-  above), or let `ae prune` age out the ones seen once.
-- Confidence between sibling expansions is less extreme: a 0.15 cosine lead
-  is now e:1 odds, not 0.1, which on labeled ambiguous prompts makes the top
-  pick's confidence match how often it is right. A consumer gating on
-  `confidence` for an acronym with several meanings may see slightly lower
-  scores. Scoring a sibling with no stored context no longer re-runs the model
-  for its phrase on every hit.
-- Opening a dictionary drops the `candidate_contexts` table, which scored the
-  cross-text mining removed above. Nothing to do; an older `ae` recreates it.
-- `ae add ACR` with no expansion now says what watching means: expansions are
-  mined from text that mentions ACR. The JSON status is unchanged.
-- Slash-joined acronyms (`CI/CD`, `TCP/IP`, `GPU/CPU`) now expand and become
-  candidates part by part; they used to be skipped as paths. Real paths
-  (`src/main.rs`, `/usr/bin`) are still skipped. Nothing to do.
+
+After upgrading:
+
+1. Run `ae prune` once. It brings entries an older `ae` learned up to the
+   current rules: it drops inline definitions whose initials don't spell their
+   acronym, merges expansions that differ only in case, and clears candidates
+   that aren't acronyms (`WHERE`, `TODO`, `V1`) with whatever was mined for
+   them. It backs up first when it changes dictionary entries; `ae rm
+   --restore` undoes it.
+2. Optionally, run `ae rm --unverified` to keep only verified entries (yours
+   and the built-in defaults). Most mined rows an older `ae` collected are
+   coincidences (see mining below), and this drops them along with every
+   inline-learned row. It also backs up first.
+3. Re-tune any threshold you apply to `confidence`. It now means something
+   different (below), and a sole expansion scores 1.0 or 0.9.
+
+Older backups stay in `/tmp/ae` until a reboot clears them; restore one by
+path (`ae rm --restore /tmp/ae/backup_….db`).
+
+### Confidence
+
+- An expansion's `confidence` is the probability that it's the meaning here:
+  its validity (1.0 verified, 0.9 inline) times its softmax share of the
+  contextual fit among the acronym's expansions. A sole expansion scores its
+  validity; siblings split the probability, so junk siblings dilute a verified
+  expansion. It used to be the raw similarity between the prompt and the
+  expansion's own words, which sat near zero for most prompts.
+- Without the embedding model (offline, not yet cached), context now counts;
+  siblings used to split evenly whatever the prompt said. Contexts stored
+  offline before still match, more weakly.
+
+### Matching and learning
+
+- A known acronym expands only when written in acronym casing: `us`, `it` and
+  `okr` no longer expand. Mentions inside an identifier or path
+  (`src/ID/x.rs`, `config.ID.url`, `foo_ID`) are skipped.
+- Slash-joined acronyms (`CI/CD`, `TCP/IP`) count part by part, as expansions
+  and as candidates. Real paths (`src/main.rs`) are still skipped.
+- An inline definition is confirmed only when its initials spell the acronym;
+  camel case counts (`JavaScript Object Notation` spells `JSON`). Any other is
+  reported as an extraction, its acronym stays a candidate, and nothing about
+  it is stored.
+- Expansions are mined only from text that mentions the acronym. Mining any
+  text whose initials happened to spell a watched acronym (`UTF: use the foo`)
+  made nearly all of `ae suggest`'s list. `ae add ACR` with no expansion now
+  says so.
+- Candidates skip tokens that aren't acronyms: ordinary words in caps
+  (`WHERE`, `POST`, per the system wordlist when one is installed) and their
+  inflections (`FAILED`, `VALUES`), numbered labels (`V1`, `Q1`, `FY27`), and
+  `INFO`/`DEBUG`/`TODO`/`FIXME`. `AI`, `IDE`, `ISO`, `ROI`, `ETA` and `SLA`
+  stay candidates. A real acronym that is also a word (`REST`) is no longer a
+  candidate; `ae add` it, with or without an expansion.
+- Expansions that differ only in (ASCII) case are one row: adding `buildkite`
+  beside `Buildkite` no longer makes a sibling. The row keeps its casing unless
+  a stronger source arrives, so `ae add` over an inline row takes your casing.
+
+### Commands
+
+- New `ae stats`: how much of the dictionary is verified, how many
+  inline-learned expansions spell their acronym, and how much is speculation.
+- New `ae rm [ACR] --unverified`: drop every expansion you didn't add, keeping
+  `user` rows. Across the whole dictionary it backs up first.
+- `ae prune` does the legacy cleanup in step 1 (the automatic pass doesn't
+  touch confirmed entries) and drops non-acronym candidates however often
+  they were seen. Its JSON gains `unaligned_removed`,
+  `case_duplicates_merged`, `non_acronyms_removed`,
+  `non_acronym_expansions_removed` and `backup`.
+- `ae rm ACR <expansion>` prefers an exact match, then a unique match ignoring
+  case, then a substring: `ae rm PP "Partner Platform"` no longer refuses
+  because "Agent and Partner Platform" also matches.
+- `rm`'s JSON always carries `backup` (a path or `null`); `acronym` is `null`
+  for a removal spanning every acronym.
+- Backups live beside the database, in `backups/<db name>-<timestamp>.db`
+  (`~/.local/share/ae/backups/` for the default dictionary), private to you,
+  newest 10 kept. A bare `ae rm --restore` considers only this database's
+  backups, and a reboot no longer deletes them. A bulk remove that removes
+  nothing takes no backup.
+- Piping into a reader that stops early (`ae candidates | head`) exits quietly
+  with success instead of failing on a broken pipe.
+- Opening a dictionary drops the unused `candidate_contexts` table; an older
+  `ae` recreates it.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
