@@ -117,7 +117,7 @@ impl Engine {
         let ignored = self.store.ignored_set()?;
 
         let expansions = self.expand(text, &query_vec, &ignored)?;
-        let (confirmed, speculative) = self.learn_and_persist(text, &ignored)?;
+        let (confirmed, unaligned) = self.learn_and_persist(text, &ignored)?;
         // An unconfirmed acronym is still undefined, so it stays a candidate.
         let candidates = candidate_acronyms(text, &expansions, &confirmed, &ignored);
 
@@ -128,7 +128,7 @@ impl Engine {
         Ok(AnalysisPayload {
             sentence: text.to_string(),
             expansions,
-            extractions: confirmed.into_iter().chain(speculative).collect(),
+            extractions: confirmed.into_iter().chain(unaligned).collect(),
             candidates,
         })
     }
@@ -236,10 +236,10 @@ impl Engine {
     }
 
     /// Stage 2 — extract inline definitions and return them as `(confirmed,
-    /// speculative)`. Aligned ones (initials spell the acronym) are confirmed:
-    /// persisted as `inline` with a context embedding. The rest are mostly
-    /// fragments and names, so they only accrue as speculation for `suggest`,
-    /// where recurrence has to earn them a place.
+    /// unaligned)`. Aligned ones (initials spell the acronym) are confirmed:
+    /// persisted as `inline` with a context embedding. The rest are reported
+    /// but not kept: on real data they are almost all sentence fragments, and
+    /// as speculation they cluttered `suggest` even for defined acronyms.
     fn learn_and_persist(
         &self,
         text: &str,
@@ -247,7 +247,7 @@ impl Engine {
     ) -> rusqlite::Result<(Vec<Extraction>, Vec<Extraction>)> {
         // A muted acronym stays dormant — don't persist, expand, or surface its
         // inline definition.
-        let (confirmed, speculative): (Vec<Extraction>, Vec<Extraction>) = learn::extract(text)
+        let (confirmed, unaligned): (Vec<Extraction>, Vec<Extraction>) = learn::extract(text)
             .into_iter()
             .filter(|c| !ignored.contains(&c.acronym.to_uppercase()))
             .partition(learn::is_aligned);
@@ -259,15 +259,7 @@ impl Engine {
             let ctx = compress_matryoshka_vector(&self.embedder.embed(&c.extracted_definition));
             self.store.add_context(id, &ctx)?;
         }
-        for c in &speculative {
-            // The author paired them in this very text: same-sentence evidence.
-            self.store.record_potential(
-                &c.acronym,
-                &c.extracted_definition,
-                SAME_SENTENCE_COHERENCE,
-            )?;
-        }
-        Ok((confirmed, speculative))
+        Ok((confirmed, unaligned))
     }
 
     /// Number of acronyms currently known — exposed for diagnostics/tests.
@@ -1537,19 +1529,21 @@ mod tests {
     }
 
     #[test]
-    fn an_unaligned_extraction_is_speculative_not_confirmed() {
+    fn an_unaligned_extraction_is_reported_not_persisted() {
         let e = Engine::in_memory().unwrap();
         let out = e.analyze("we met Jane Doe (ZQX) today").unwrap();
         // Still the record of what was seen, and ZQX stays undefined.
         assert!(out.extractions.iter().any(|x| x.acronym == "ZQX"));
         assert!(out.candidates.contains(&"ZQX".to_string()));
-        // Not in the dictionary, so it never expands; `suggest` has it.
+        // Neither confirmed nor kept as speculation.
         assert!(matches_for(&e, "ship the ZQX", "ZQX").is_empty());
-        assert!(
-            e.potentials_for("ZQX")
-                .unwrap()
-                .iter()
-                .any(|(p, _)| p == "we met jane doe")
-        );
+        assert!(e.potentials_for("ZQX").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unaligned_extraction_adds_no_suggestion_for_a_defined_acronym() {
+        let e = Engine::in_memory().unwrap();
+        e.analyze("Ping the Platform Team (KPI) today").unwrap();
+        assert!(e.potentials_for("KPI").unwrap().is_empty());
     }
 }

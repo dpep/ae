@@ -93,6 +93,10 @@ releases are grouped at the end.
   and `It` no longer expand as `US` and `IT`, and a mention inside an
   identifier or path (`src/ID/x.rs`, `config.ID.url`, `foo_ID`) is skipped.
   `ae "look at the okr"` no longer expands; write `OKR`. Nothing to do.
+- Inline definitions in camel case now count as spelling their acronym:
+  `JSON (JavaScript Object Notation)` and `GitHub (GH)` are learned. One that
+  doesn't spell its acronym is reported as an extraction and nothing more; it
+  is not kept for `ae suggest` either. Nothing to do.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

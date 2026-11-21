@@ -75,16 +75,16 @@ pub fn is_aligned(e: &Extraction) -> bool {
 /// the whole trimmed phrase and `false`.
 fn realign(definition: &str, acronym: &str) -> (String, bool) {
     let words: Vec<&str> = definition.split_whitespace().collect();
-    let inits: Vec<char> = words.iter().map(|w| initial(w)).collect();
+    let inits: Vec<Vec<char>> = words.iter().map(|w| initials(w)).collect();
     let target: Vec<char> = acronym.chars().map(|c| c.to_ascii_uppercase()).collect();
 
     // The window must end at the acronym's last letter — anchor at the tail.
-    let ends_ok = inits.last() == target.last();
+    let ends_ok = inits.last().and_then(|i| i.last()) == target.last();
     if ends_ok {
         // Largest start (tightest window) whose first word opens the acronym and
         // whose initials still spell it as a subsequence.
         for start in (0..words.len()).rev() {
-            if inits[start] == target[0] && is_subsequence(&target, &inits[start..]) {
+            if inits[start][0] == target[0] && is_subsequence(&target, &inits[start..].concat()) {
                 return (words[start..].join(" "), true);
             }
         }
@@ -92,12 +92,20 @@ fn realign(definition: &str, acronym: &str) -> (String, bool) {
     (words.join(" "), false)
 }
 
-/// The uppercased first alphanumeric letter of a word (`'?'` if it has none).
-fn initial(word: &str) -> char {
-    word.chars()
+/// The uppercased initial of each part of a word: its first alphanumeric
+/// letter (`'?'` if it has none), then every capital that follows a lowercase
+/// letter, so `JavaScript` gives `J, S`. An all-caps word stays one part.
+fn initials(word: &str) -> Vec<char> {
+    let first = word
+        .chars()
         .find(|c| c.is_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .unwrap_or('?')
+        .map_or('?', |c| c.to_ascii_uppercase());
+    let humps = word
+        .chars()
+        .zip(word.chars().skip(1))
+        .filter(|(prev, c)| prev.is_lowercase() && c.is_uppercase())
+        .map(|(_, c)| c);
+    std::iter::once(first).chain(humps).collect()
 }
 
 /// Is `needle` an in-order subsequence of `haystack`?
@@ -168,6 +176,31 @@ mod tests {
         ] {
             assert!(extract(text).iter().all(is_aligned), "{text}");
         }
+    }
+
+    #[test]
+    fn an_internal_capital_starts_a_word() {
+        for (text, acronym, definition) in [
+            (
+                "Use JSON (JavaScript Object Notation) here.",
+                "JSON",
+                "JavaScript Object Notation",
+            ),
+            ("Push to GitHub (GH) today.", "GH", "GitHub"),
+        ] {
+            let got = extract(text);
+            assert_eq!(got.len(), 1, "{text}");
+            assert_eq!(got[0].acronym, acronym);
+            assert_eq!(got[0].extracted_definition, definition);
+            assert!(is_aligned(&got[0]), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_all_caps_word_is_one_initial() {
+        // Only a capital after a lowercase letter opens a part, so a shouted
+        // word doesn't spell out its own letters.
+        assert!(!extract("Read the API (AI) docs.").iter().any(is_aligned));
     }
 
     #[test]

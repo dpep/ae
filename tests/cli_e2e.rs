@@ -1168,3 +1168,26 @@ fn an_ordinary_lowercase_word_does_not_expand_as_an_acronym() {
         ["US", "IT"]
     );
 }
+
+#[test]
+fn an_inline_definition_learns_only_when_its_initials_spell_the_acronym() {
+    let sock = scratch_socket("alignlearn");
+    // Camel case: each capital starts a word, so this spells WSON.
+    run(
+        &sock,
+        &["-q"],
+        Some("Send WSON (WidgetSoft Object Notation) over."),
+    );
+    assert_eq!(expanded_acronyms(&sock, "parse the WSON file"), ["WSON"]);
+
+    // A fragment that doesn't spell KPI is reported but leaves no suggestion.
+    let out = run(&sock, &["-j"], Some("Ping the Platform Team (KPI) today"));
+    assert!(out.stdout.contains("extraction"), "{}", out.stdout);
+    let s = run(
+        &sock,
+        &["suggest", "KPI", "--min-confidence", "0", "-j"],
+        None,
+    );
+    let v: serde_json::Value = serde_json::from_str(&s.stdout).unwrap();
+    assert!(v.as_array().unwrap().is_empty(), "{}", s.stdout);
+}

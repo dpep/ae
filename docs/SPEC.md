@@ -111,10 +111,11 @@ fit_i      = max cosine(query, context) over expansion i's recorded contexts,
   same vector its first context would hold, so it is neither favoured nor
   penalized against siblings that have one.
 - Matches are ranked by confidence, with validity breaking ties.
-- Only aligned inline definitions (initials spell the acronym) are confirmed as
-  `inline`. An unaligned one is still reported as an extraction, and its
-  acronym stays a candidate, but it is recorded only as a speculative `mined`
-  expansion for `ae suggest`.
+- Only aligned inline definitions are confirmed as `inline`: the initials of
+  the definition's words spell the acronym, where a capital after a lowercase
+  letter also starts a word (`JavaScript Object Notation` spells `JSON`). An
+  unaligned one is still reported as an extraction, and its acronym stays a
+  candidate, but nothing about it is persisted.
 
 ## Milestones
 
