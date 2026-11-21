@@ -225,14 +225,17 @@ impl Store {
     pub fn add_entry(&self, acronym: &str, expansion: &str, source: &str) -> Result<i64> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim();
-        // NOCASE folds ASCII only. Exact casing first, for legacy case siblings
-        // (an exact hit also keeps the UPDATE below off the unique index).
+        // NOCASE folds ASCII only. The strongest sibling first, so a mined
+        // lowercase copy never wins over a confirmed row; then exact casing,
+        // for legacy confirmed siblings.
         let existing: Option<(i64, String)> = self
             .conn
             .query_row(
                 "SELECT id, source FROM acronym_dictionary
                  WHERE acronym = ?1 AND expansion = ?2 COLLATE NOCASE
-                 ORDER BY expansion = ?2 DESC, id LIMIT 1",
+                 ORDER BY CASE source WHEN 'user' THEN 2 WHEN 'inline' THEN 1 ELSE 0 END DESC,
+                          expansion = ?2 DESC, id
+                 LIMIT 1",
                 params![acronym, expansion],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -240,6 +243,14 @@ impl Store {
         let id = match existing {
             Some((id, current)) => {
                 if source_rank(source) > source_rank(&current) {
+                    // A sibling already spelled the new way ranks below this
+                    // one (else it was picked) — speculation, which carries no
+                    // contexts. Absorb it rather than collide on the index.
+                    self.conn.execute(
+                        "DELETE FROM acronym_dictionary
+                         WHERE acronym = ?1 AND expansion = ?2 AND id != ?3",
+                        params![acronym, expansion, id],
+                    )?;
                     self.conn.execute(
                         "UPDATE acronym_dictionary SET source = ?2, expansion = ?3 WHERE id = ?1",
                         params![id, source, expansion],
@@ -1727,6 +1738,32 @@ mod tests {
         s.record_potential("WQ", "widget quorum", 1.0).unwrap();
         s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
         assert_eq!(rows_of(&s, "WQ"), row("Widget Quorum", "inline"));
+    }
+
+    #[test]
+    fn add_folds_onto_the_confirmed_row_over_a_mined_case_sibling() {
+        let row = |e: &str, src: &str| (e.to_string(), src.to_string());
+
+        // Re-adding with the mined row's casing must not confirm the mined row
+        // alongside the user one.
+        let s = Store::open_in_memory().unwrap();
+        let id = s.add_entry("BK", "Buildkite", "user").unwrap();
+        s.record_potential("BK", "buildkite", 1.0).unwrap();
+        assert_eq!(s.add_entry("BK", "buildkite", "user").unwrap(), id);
+        assert_eq!(
+            s.expansions_for("BK").unwrap(),
+            vec![(id, "Buildkite".to_string(), "user".to_string())]
+        );
+
+        // Upgrading the confirmed row to the mined row's casing absorbs the
+        // mined row instead of colliding with it.
+        let s = Store::open_in_memory().unwrap();
+        let id = s.add_entry("BK", "Buildkite", "inline").unwrap();
+        s.record_potential("BK", "buildkite", 1.0).unwrap();
+        s.add_context(id, &[0.0; MRL_DIMS]).unwrap();
+        assert_eq!(s.add_entry("BK", "buildkite", "user").unwrap(), id);
+        assert_eq!(rows_of(&s, "BK"), vec![row("buildkite", "user")]);
+        assert_eq!(s.contexts_for(id).unwrap().len(), 1);
     }
 
     #[test]
