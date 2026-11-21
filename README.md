@@ -136,7 +136,7 @@ confirmed   8 expansions across 8 acronyms
 verified    7 (88%): 6 built-in defaults, 1 added by you
 inline      1 learned from text, 1 (100%) spelling their acronym
 mined       1 speculative (ae suggest)
-candidates  3 undefined, 1 being mined for expansions
+candidates  3 undefined, 1 recurring (seen 3+ times or declared)
 ```
 
 `verified` is what a person asserted (`user` rows); the schema doesn't record

@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_candidate_watch
 const WATCHED: &str = "(source = 'declared' OR count >= 3)";
 
 /// How often an acronym must be *seen* (or be declared) before it joins the
-/// watch list and we mine its expansions from unrelated text.
+/// watch list, so ae mines it wherever a text mentions it.
 pub const WATCH_THRESHOLD: i64 = 3;
 
 /// Confidence floor `prune` (and the amortized GC) discard mined expansions

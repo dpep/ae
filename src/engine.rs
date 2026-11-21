@@ -399,7 +399,7 @@ impl Engine {
     /// Bring the warm expansion trie in line with the store and return the
     /// watch list. Both are rebuilt only when the cheap `(known, watch-list,
     /// ignored)` signature changes — which catches out-of-band edits from
-    /// another process (`add`/`rm`/`watch`/…) since they move those counts —
+    /// another process (`add`/`rm`/`ignore`/…) since they move those counts —
     /// or when it ages past [`DICTIONARY_MAX_AGE`].
     fn sync_dictionary(&self) -> rusqlite::Result<Arc<HashSet<String>>> {
         let signature = (

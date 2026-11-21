@@ -170,7 +170,7 @@ pub fn render_stats(
             writeln!(out, "mined       {} speculative (ae suggest)", s.mined)?;
             writeln!(
                 out,
-                "candidates  {} undefined, {} being mined for expansions",
+                "candidates  {} undefined, {} recurring (seen 3+ times or declared)",
                 s.candidates, s.watched
             )?;
         }
@@ -565,7 +565,7 @@ mod tests {
         render_stats(&mut buf, &stats, Format::Human).unwrap();
         let out = String::from_utf8(buf).unwrap();
         // 7 verified = 6 built-in defaults + 1 of yours.
-        for phrase in ["6 built-in defaults", "1 added by you", "being mined"] {
+        for phrase in ["6 built-in defaults", "1 added by you", "recurring"] {
             assert!(out.contains(phrase), "missing {phrase:?} in:\n{out}");
         }
         assert!(!out.contains(" watched"), "{out}");

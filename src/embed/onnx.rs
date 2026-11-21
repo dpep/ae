@@ -38,8 +38,8 @@ pub struct OnnxEmbedder {
 
 impl OnnxEmbedder {
     /// Load the embedder. `spec` is an optional `--model` request: an absolute
-    /// or relative path (to a model directory or `.onnx` file) or a bare name
-    /// resolved against the model search dirs. Returns `None` (→ hash fallback)
+    /// or relative path (to a model directory or `.onnx` file) or an `org/name`
+    /// HF Hub repo id. Returns `None` (→ hash fallback)
     /// if nothing usable loads.
     pub fn load(spec: Option<&str>) -> Option<Self> {
         ensure_ort_dylib();
