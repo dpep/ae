@@ -1,30 +1,58 @@
-//! Dictionary spell-correction for mined expansions, against the *system* word
-//! list — no bundle, no download. If no list is present we simply skip it.
+//! The *system* word list — no bundle, no download. If no list is present,
+//! everything that uses it is simply skipped.
 //!
-//! Used only by `prune` over speculative (mined) expansions, so the blast radius
-//! of a wrong correction is limited to suggestions a human will vet before
-//! promoting. Words absent from the list (jargon, proper nouns) are left alone
-//! unless an edit-distance-1 neighbour exists in it.
+//! Two uses: `prune` spell-corrects speculative (mined) expansions against it,
+//! so the blast radius of a wrong correction is limited to suggestions a human
+//! will vet before promoting; and candidate tracking drops all-caps tokens that
+//! are just ordinary words ([`short_words`]). Words absent from the list
+//! (jargon, proper nouns) are left alone unless an edit-distance-1 neighbour
+//! exists in it.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 const WORDLIST_PATHS: &[&str] = &["/usr/share/dict/words", "/usr/dict/words"];
 
+/// Longest word kept by [`short_words`] — mirrors the acronym-shape cap in
+/// `engine::is_acronym_shaped`; a longer word can never collide with one.
+const SHORT_WORD_MAX: usize = 6;
+
+fn read_wordlist() -> Option<String> {
+    WORDLIST_PATHS.iter().find_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+    })
+}
+
 /// Load the system word list (lowercased), or `None` if none is installed.
 pub fn load_wordlist() -> Option<HashSet<String>> {
-    for path in WORDLIST_PATHS {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            let words: HashSet<String> = text
-                .lines()
-                .map(|w| w.trim().to_lowercase())
-                .filter(|w| !w.is_empty())
-                .collect();
-            if !words.is_empty() {
-                return Some(words);
-            }
-        }
-    }
-    None
+    let words: HashSet<String> = read_wordlist()?
+        .lines()
+        .map(|w| w.trim().to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
+/// Ordinary words short enough to be mistaken for an acronym, loaded once per
+/// process — `None` when no system list is installed.
+pub fn system_short_words() -> Option<&'static HashSet<String>> {
+    static WORDS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+    WORDS
+        .get_or_init(|| Some(short_words(&read_wordlist()?)).filter(|w| !w.is_empty()))
+        .as_ref()
+}
+
+/// The 2..=[`SHORT_WORD_MAX`]-letter entries written in lowercase. A
+/// capitalized entry is a proper noun (`Ada`), not a word someone would shout.
+fn short_words(text: &str) -> HashSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|w| (2..=SHORT_WORD_MAX).contains(&w.len()))
+        .filter(|w| w.bytes().all(|b| b.is_ascii_lowercase()))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Correct an expansion word by word: any word not in `words` is replaced by an
@@ -118,5 +146,13 @@ mod tests {
     fn leaves_unknown_words_without_a_neighbour_alone() {
         let w = words(&["product"]);
         assert_eq!(correct("kubernetes product", &w), "kubernetes product");
+    }
+
+    #[test]
+    fn short_words_keep_only_short_lowercase_entries() {
+        // Capitalized entries are proper nouns, not ordinary words; possessives
+        // and long words can never collide with an acronym-shaped token.
+        let w = short_words("cat\nAda\nwhere\ncat's\nextraordinary\na\n");
+        assert_eq!(w, words(&["cat", "where"]));
     }
 }

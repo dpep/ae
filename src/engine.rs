@@ -627,7 +627,11 @@ fn candidate_acronyms(
         }
         for token in tokens(word) {
             let upper = token.to_uppercase();
-            if !is_acronym_shaped(token) || covered.contains(&upper) || ignored.contains(&upper) {
+            if !is_acronym_shaped(token)
+                || is_noise(token, crate::spell::system_short_words())
+                || covered.contains(&upper)
+                || ignored.contains(&upper)
+            {
                 continue;
             }
             if !resolved.contains(&upper) && seen.insert(upper) {
@@ -711,6 +715,30 @@ fn is_acronym_shaped(token: &str) -> bool {
         }
     }
     has_letter
+}
+
+/// Acronym-shaped tokens that are clearly not acronyms. Applied only to
+/// candidates: a dictionary entry is resolved before this runs, so `ae add CAT`
+/// still expands.
+fn is_noise(token: &str, words: Option<&std::collections::HashSet<String>>) -> bool {
+    is_numbered_label(token)
+        || NOISE_TOKENS.contains(&token)
+        || words.is_some_and(|w| w.contains(&token.to_lowercase()))
+}
+
+/// Shouted words the system wordlist lacks (it predates them) — log
+/// levels (`INFO`, `DEBUG`) and code annotations (`TODO`, `FIXME`).
+const NOISE_TOKENS: &[&str] = &["INFO", "DEBUG", "TODO", "FIXME"];
+
+/// `V1`, `L4`, `Q1`, `H1`, `P0`, `FY27`: a version, level, quarter, half,
+/// priority, or fiscal year. No shape tells `Q1` from `S3`, so the prefixes are
+/// listed; anything with a letter after its digits (`K8S`, `P2P`) is kept.
+fn is_numbered_label(token: &str) -> bool {
+    let digits = token.trim_start_matches(|c: char| c.is_ascii_uppercase());
+    let prefix = &token[..token.len() - digits.len()];
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && matches!(prefix, "V" | "L" | "Q" | "H" | "P" | "FY")
 }
 
 #[cfg(test)]
@@ -1294,5 +1322,74 @@ mod tests {
             out.expansions.iter().filter(|r| r.acronym == "OKR").count(),
             1
         );
+    }
+
+    // --- candidate noise: shouted words, numbered labels, stoplist ---
+
+    fn word_set(list: &[&str]) -> std::collections::HashSet<String> {
+        list.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn a_shouted_ordinary_word_is_noise_when_a_wordlist_exists() {
+        let words = word_set(&["not", "where", "from", "post", "warn"]);
+        for token in ["NOT", "WHERE", "FROM", "POST", "WARN"] {
+            assert!(is_noise(token, Some(&words)), "{token} should be noise");
+        }
+        // Not a word → still a candidate.
+        assert!(!is_noise("ZQX", Some(&words)));
+    }
+
+    #[test]
+    fn without_a_wordlist_words_stay_candidates() {
+        // No system wordlist (e.g. a bare Linux box): degrade to no word filter
+        // rather than guessing.
+        assert!(!is_noise("WHERE", None));
+        assert!(!is_noise("ZQX", None));
+    }
+
+    #[test]
+    fn numbered_labels_are_noise_but_digit_acronyms_are_not() {
+        for token in ["V1", "V12", "L4", "Q1", "H1", "P0", "FY27", "FY2027"] {
+            assert!(is_noise(token, None), "{token} should be noise");
+        }
+        for token in ["S3", "EC2", "K8S", "P2P", "B2B", "MP3", "E2E"] {
+            assert!(!is_noise(token, None), "{token} is a real acronym");
+        }
+    }
+
+    #[test]
+    fn stoplisted_tokens_are_noise_without_a_wordlist() {
+        for token in ["INFO", "DEBUG", "TODO", "FIXME"] {
+            assert!(is_noise(token, None), "{token} should be noise");
+        }
+    }
+
+    #[test]
+    fn noise_tokens_are_neither_surfaced_nor_recorded() {
+        let e = Engine::in_memory().unwrap();
+        // Only the stoplist and label rules — no wordlist dependence here.
+        let out = e
+            .analyze("bumped to V1 in Q1 FY27 with INFO logs for the ZQX bucket")
+            .unwrap();
+        assert_eq!(out.candidates, vec!["ZQX".to_string()]);
+        let recorded: Vec<String> = e
+            .candidate_counts()
+            .unwrap()
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(recorded, vec!["ZQX".to_string()]);
+    }
+
+    #[test]
+    fn a_declared_noise_token_is_still_mined() {
+        let e = Engine::in_memory().unwrap();
+        // The filter only hides candidates; a declared acronym is mined from
+        // the watch list regardless.
+        e.declare_acronym("TODO").unwrap();
+        let out = e.analyze("we track our daily output here").unwrap();
+        assert!(out.candidates.is_empty());
+        assert!(!e.potentials_for("TODO").unwrap().is_empty());
     }
 }

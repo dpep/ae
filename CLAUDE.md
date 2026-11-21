@@ -75,7 +75,7 @@ ae/
     mrl.rs       ← Matryoshka truncate + L2 normalize + cosine
     trie.rs      ← thread-safe prefix tree
     store.rs     ← SQLite schema, dictionary, vector store
-    spell.rs     ← system-wordlist spell-correction for mined expansions
+    spell.rs     ← system wordlist: spell-correction, candidate word filter
     embed.rs     ← Embedder trait, HashEmbedder, default_embedder
     embed/onnx.rs← OnnxEmbedder: model resolution, inference, mean-pool
     learn.rs     ← rule-based acronym/definition extraction

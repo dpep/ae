@@ -7,6 +7,16 @@ Entries are reconstructed from tags and their release notes, so they summarise
 what shipped rather than every commit. Only 0.3.3 onward were tagged; earlier
 releases are grouped at the end.
 
+## Unreleased
+- Candidates skip tokens that aren't acronyms: an ordinary word in caps
+  (`WHERE`, `NOT`, `POST`, `WARN` — checked against the system wordlist, when
+  one is installed), a numbered label (`V1`, `L4`, `Q1`, `H1`, `P0`, `FY27`),
+  and `INFO`/`DEBUG`/`TODO`/`FIXME`. A real acronym that is also a word (`SLA`,
+  `ETA`, `CAT`) is no longer surfaced as a candidate; define it with `ae add`,
+  or `ae add` it with no expansion to keep mining for one. Junk candidates
+  already recorded stay (`ae prune` only drops seen-once ones); clear each with
+  `ae ignore`.
+
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying
   with an empty result, so the caller falls back in-process and reports the
