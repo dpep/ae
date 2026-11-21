@@ -10,6 +10,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, Result, Transaction, TransactionBehavior, params};
 
+use serde::Serialize;
+
 use crate::mrl::MRL_DIMS;
 
 const SCHEMA: &str = "
@@ -142,6 +144,35 @@ pub struct ConsolidateStats {
     pub non_acronyms: usize,
     /// Mined expansions dropped along with those candidates.
     pub non_acronym_expansions: usize,
+}
+
+/// Dictionary health for `ae stats`: counts, and shares derived from them.
+/// Field names are the JSON contract.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DictionaryStats {
+    /// Confirmed (`user` + `inline`) expansions, and the acronyms they cover.
+    pub confirmed: usize,
+    pub acronyms: usize,
+    /// `user` rows. The schema can't tell a seeded default from one you added,
+    /// so `builtin` counts those still matching [`DEFAULT_DICTIONARY`].
+    pub verified: usize,
+    pub builtin: usize,
+    pub verified_share: Option<f64>,
+    /// `inline` rows, and how many have initials that spell their acronym.
+    pub inline: usize,
+    pub aligned: usize,
+    pub aligned_share: Option<f64>,
+    /// Speculative rows. Not checked for alignment: mining only finds phrases
+    /// whose initials spell the acronym.
+    pub mined: usize,
+    pub candidates: usize,
+    pub watched: usize,
+}
+
+/// `n / d` to two decimals — the precision a share of small counts has — or
+/// `None` when there is nothing to divide.
+fn share(n: usize, d: usize) -> Option<f64> {
+    (d > 0).then(|| (n as f64 / d as f64 * 100.0).round() / 100.0)
 }
 
 impl Store {
@@ -890,6 +921,63 @@ impl Store {
         })
     }
 
+    /// Dictionary health — see [`DictionaryStats`].
+    pub fn stats(&self) -> Result<DictionaryStats> {
+        let mut stmt = self.conn.prepare(
+            "SELECT acronym, expansion, source FROM acronym_dictionary
+             WHERE source IN ('user', 'inline')",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut acronyms = std::collections::HashSet::new();
+        let (mut verified, mut builtin, mut inline, mut aligned) = (0, 0, 0, 0);
+        for (acronym, expansion, source) in &rows {
+            acronyms.insert(acronym.as_str());
+            if source == "user" {
+                verified += 1;
+                builtin += usize::from(DEFAULT_DICTIONARY.iter().any(|(a, e)| {
+                    a.eq_ignore_ascii_case(acronym) && e.eq_ignore_ascii_case(expansion)
+                }));
+            } else {
+                inline += 1;
+                aligned += usize::from(crate::learn::is_aligned(&crate::types::Extraction {
+                    acronym: acronym.clone(),
+                    extracted_definition: expansion.clone(),
+                    pattern_type: String::new(),
+                    confidence: 0.0,
+                }));
+            }
+        }
+        let count = |sql: &str| -> Result<usize> {
+            self.conn
+                .query_row(sql, [], |row| row.get::<_, i64>(0))
+                .map(|n| n as usize)
+        };
+        Ok(DictionaryStats {
+            confirmed: rows.len(),
+            acronyms: acronyms.len(),
+            verified,
+            builtin,
+            verified_share: share(verified, rows.len()),
+            inline,
+            aligned,
+            aligned_share: share(aligned, inline),
+            mined: count("SELECT COUNT(*) FROM acronym_dictionary WHERE source = 'mined'")?,
+            candidates: count("SELECT COUNT(*) FROM candidate_acronyms")?,
+            watched: count(&format!(
+                "SELECT COUNT(*) FROM candidate_acronyms WHERE {WATCHED}"
+            ))?,
+        })
+    }
+
     /// Number of *confirmed* expansions — gates default seeding.
     pub fn count(&self) -> Result<i64> {
         self.conn.query_row(
@@ -1570,6 +1658,26 @@ mod tests {
         s.add_context(id, &v).unwrap();
         let back = s.contexts_for(id).unwrap();
         assert_eq!(back, vec![v]);
+    }
+
+    #[test]
+    fn shares_round_to_two_decimals_and_need_a_denominator() {
+        assert_eq!(share(7, 9), Some(0.78));
+        assert_eq!(share(1, 3), Some(0.33));
+        assert_eq!(share(0, 4), Some(0.0));
+        assert_eq!(share(0, 0), None);
+    }
+
+    #[test]
+    fn stats_tell_builtins_from_your_own_verified_rows() {
+        let s = Store::open_in_memory().unwrap();
+        s.seed_defaults().unwrap();
+        s.delete_acronym("RAM").unwrap();
+        s.add_entry("KPI", "Key Process Input", "user").unwrap();
+        let st = s.stats().unwrap();
+        assert_eq!(st.verified, DEFAULT_DICTIONARY.len());
+        assert_eq!(st.builtin, DEFAULT_DICTIONARY.len() - 1);
+        assert_eq!(st.acronyms, DEFAULT_DICTIONARY.len() - 1);
     }
 
     /// `(expansion, source)` rows of `acronym`, confirmed and mined alike.

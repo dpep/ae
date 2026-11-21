@@ -153,6 +153,9 @@ pub enum Command {
     /// List candidate acronyms (seen but undefined) with provenance + watch
     /// state, by frequency.
     Candidates,
+    /// Dictionary health: how much is verified, how much of what was learned
+    /// inline actually spells its acronym, and how much is speculation.
+    Stats,
     /// Suggest speculative expansions mined from text, with confidence.
     /// Optionally for one acronym.
     Suggest {
@@ -533,9 +536,21 @@ fn run_command(command: &Command, cli: &Cli, fmt: Format) -> ExitCode {
             };
             emit_entries(fmt, entries)
         }
-        Command::Show { .. } | Command::Candidates | Command::Suggest { .. } if quiet => {
+        Command::Show { .. } | Command::Candidates | Command::Suggest { .. } | Command::Stats
+            if quiet =>
+        {
             ExitCode::SUCCESS
         }
+        Command::Stats => match store.stats() {
+            Ok(stats) => {
+                let stdout = io::stdout();
+                if let Err(e) = output::render_stats(&mut stdout.lock(), &stats, fmt) {
+                    return fail(fmt, &format!("render failed: {e}"));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail(fmt, &format!("dictionary error: {e}")),
+        },
         Command::Show { acronym } => {
             let entries = store.expansions_for(acronym).map(|rows| {
                 rows.into_iter()

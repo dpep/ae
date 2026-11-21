@@ -936,3 +936,56 @@ fn prune_clears_recorded_non_acronyms_but_not_declared_ones() {
     let human = run(&sock, &["prune"], None);
     assert!(human.stdout.contains("non-acronym"), "{}", human.stdout);
 }
+
+/// Six built-ins, one user entry, an aligned and an unaligned inline entry, a
+/// mined row, and two candidates (one watched).
+fn stats_fixture(label: &str) -> PathBuf {
+    let sock = scratch_socket(label);
+    let s = store_of(&sock);
+    s.seed_defaults().unwrap();
+    s.add_entry("ZQ", "Zone Quota", "user").unwrap();
+    s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
+    s.add_entry("XY", "Red Balloon", "inline").unwrap();
+    s.record_potential("ZQX", "zebra queue xray", 0.9).unwrap();
+    for _ in 0..3 {
+        s.record_candidate("ZQX").unwrap();
+    }
+    s.record_candidate("QQA").unwrap();
+    sock
+}
+
+#[test]
+fn stats_reports_counts_and_shares_built_from_them() {
+    let sock = stats_fixture("stats");
+    let out = run(&sock, &["stats", "-j"], None);
+    assert!(out.success, "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let want = serde_json::json!({
+        "confirmed": 9, "acronyms": 9,
+        "verified": 7, "builtin": 6, "verified_share": 0.78,
+        "inline": 2, "aligned": 1, "aligned_share": 0.5,
+        "mined": 1, "candidates": 2, "watched": 1,
+    });
+    assert_eq!(v, want);
+
+    let nd = run(&sock, &["stats", "-J"], None);
+    assert_eq!(nd.stdout.lines().count(), 1);
+    let line: serde_json::Value = serde_json::from_str(&nd.stdout).unwrap();
+    assert_eq!(line, want);
+
+    let human = run(&sock, &["stats"], None);
+    assert!(human.stdout.contains("78%"), "{}", human.stdout);
+    assert!(human.stdout.contains("50%"), "{}", human.stdout);
+}
+
+#[test]
+fn stats_on_a_fresh_dictionary_has_no_aligned_share() {
+    let sock = scratch_socket("statsfresh");
+    let out = run(&sock, &["stats", "-j"], None);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    let builtins = acronym_engine::store::DEFAULT_DICTIONARY.len();
+    assert_eq!(v["confirmed"], builtins);
+    assert_eq!(v["builtin"], builtins);
+    assert_eq!(v["verified_share"], 1.0);
+    assert!(v["aligned_share"].is_null());
+}

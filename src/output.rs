@@ -137,6 +137,43 @@ pub fn render_candidates(
 }
 
 /// Render speculative expansions: `(acronym, expansion, count, confidence)`.
+pub fn render_stats(
+    out: &mut impl Write,
+    stats: &crate::store::DictionaryStats,
+    format: Format,
+) -> std::io::Result<()> {
+    let pct = |share: Option<f64>| share.map_or(String::new(), |s| format!(" ({:.0}%)", s * 100.0));
+    match format {
+        Format::Human => {
+            let s = stats;
+            writeln!(
+                out,
+                "confirmed   {} expansions, {} acronyms",
+                s.confirmed, s.acronyms
+            )?;
+            writeln!(
+                out,
+                "verified    {}{}, {} built-in",
+                s.verified,
+                pct(s.verified_share),
+                s.builtin
+            )?;
+            writeln!(
+                out,
+                "inline      {}, {} aligned{}",
+                s.inline,
+                s.aligned,
+                pct(s.aligned_share)
+            )?;
+            writeln!(out, "mined       {}", s.mined)?;
+            writeln!(out, "candidates  {}, {} watched", s.candidates, s.watched)?;
+        }
+        Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(stats).unwrap())?,
+        Format::Ndjson => writeln!(out, "{}", serde_json::to_string(stats).unwrap())?,
+    }
+    Ok(())
+}
+
 pub fn render_suggestions(
     out: &mut impl Write,
     rows: &[(String, String, i64, f32)],

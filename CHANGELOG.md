@@ -59,6 +59,11 @@ releases are grouped at the end.
   `NOT`, `TODO` and `V1` already on your candidate list. Acronyms you declared
   with a bare `ae add` are kept. Its JSON gains `non_acronyms_removed` and
   `non_acronym_expansions_removed`.
+- `ae stats` reports how much of the dictionary is signal: confirmed
+  expansions and acronyms, how many are verified (and how many of those are
+  the built-in defaults), how many inline-learned ones spell their acronym,
+  and the mined and candidate counts. Shares come from those counts, rounded
+  to two decimals.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

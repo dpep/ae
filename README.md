@@ -94,6 +94,7 @@ ae list                               # list everything
 ae list perf                          # filter by substring of acronym or expansion
 ae show KPI                           # expansions of one acronym
 ae candidates                         # acronyms seen but undefined, by frequency
+ae stats                              # dictionary health: verified/aligned shares
 ae add PB&J                           # declare a token as an acronym (ae mines its expansion later)
 ae suggest MVP                        # speculative expansions, --limit N / --min-confidence
 ae define MVP                         # promote interactively (fzf), or pass expansions
@@ -105,6 +106,24 @@ ae rm --all                           # wipe the whole dictionary (backed up fir
 ae rm --unverified                    # keep only what you added yourself (backed up first)
 ae rm --restore                       # restore the most recent backup (or pass a path)
 ```
+
+`ae stats` says how much of the dictionary is signal:
+
+```text
+confirmed   9 expansions, 9 acronyms
+verified    7 (78%), 6 built-in
+inline      2, 1 aligned (50%)
+mined       1
+candidates  2, 1 watched
+```
+
+`verified` is what a person asserted (`user` rows); the schema doesn't record
+which of those were seeded, so `built-in` counts the ones still matching the
+built-in defaults. `aligned` is how many inline-learned expansions have
+initials that spell their acronym; a low share means `ae rm --unverified` is
+worth running. `mined` is speculation (aligned by construction), `watched` the
+candidates ae mines for. Shares are rounded to two decimals in JSON (`-j`, or
+`-J` for one line) and are `null` when there's nothing to divide.
 
 `-q/--quiet` suppresses normal output everywhere (e.g. `ae "…" -q` silently
 learns; `ae add … -q` adds without printing).

@@ -128,6 +128,13 @@ the process thread.
   daemon, so a repeated caller loads the model once, not once per call. Either
   way the structured output is the same flat list of findings (`{kind, acronym,
   …}`) — single and stream, `-j` and `-J`, all share one shape. A bare TTY invocation prints help.
+- `ae stats` reports dictionary health from counts alone: `confirmed`,
+  `acronyms`, `verified` (`user` rows), `builtin` (verified rows still matching
+  the seeded defaults; the schema has no seeded marker), `verified_share`,
+  `inline`, `aligned` (inline rows whose initials spell the acronym, by
+  `learn::is_aligned`), `aligned_share`, `mined`, `candidates`, `watched`.
+  Shares are rounded to two decimals where they're computed, and `null` with a
+  zero denominator. The hook's inject rate lives with the plugin, not here.
 - `stdout` stays pristine for data; logs go to `stderr` via `env_logger`.
 
 ### Milestone 2: IPC Socket Multiplexing & Self-Healing Guardrails
