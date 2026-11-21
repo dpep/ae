@@ -1214,3 +1214,17 @@ fn an_acronym_is_mined_only_from_text_that_mentions_it() {
     run(&sock, &["-q"], Some("our UTF is the unified test format"));
     assert_eq!(suggestions(&sock, "UTF"), ["unified test format"]);
 }
+
+#[test]
+fn a_slash_joined_acronym_list_expands_but_a_path_does_not() {
+    let sock = scratch_socket("slashlist");
+    assert!(run(&sock, &["add", "ZQ", "Zone Quota"], None).success);
+    assert!(run(&sock, &["add", "WQ", "Widget Quorum"], None).success);
+    assert_eq!(expanded_acronyms(&sock, "the ZQ/WQ split"), ["ZQ", "WQ"]);
+    assert!(expanded_acronyms(&sock, "edit src/ZQ/main.rs").is_empty());
+
+    run(&sock, &["-q"], Some("we track ZQX/ZQY here"));
+    let mut names = candidate_names(&sock);
+    names.sort();
+    assert_eq!(names, ["ZQX", "ZQY"]);
+}

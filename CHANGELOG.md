@@ -115,6 +115,9 @@ releases are grouped at the end.
   cross-text mining removed above. Nothing to do; an older `ae` recreates it.
 - `ae add ACR` with no expansion now says what watching means: expansions are
   mined from text that mentions ACR. The JSON status is unchanged.
+- Slash-joined acronyms (`CI/CD`, `TCP/IP`, `GPU/CPU`) now expand and become
+  candidates part by part; they used to be skipped as paths. Real paths
+  (`src/main.rs`, `/usr/bin`) are still skipped. Nothing to do.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

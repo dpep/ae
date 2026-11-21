@@ -680,8 +680,12 @@ fn is_identifier_word(word: &str) -> bool {
     if word.starts_with('$') || word.contains("${") {
         return true;
     }
-    // plugins/code/SKILL, C:\Users — a path.
-    if word.contains('/') || word.contains('\\') {
+    // plugins/code/SKILL, /usr/bin, C:\Users — a path. But CI/CD and TCP/IP
+    // are acronym lists: every part is non-empty with no lowercase.
+    let acronym_list = word
+        .split('/')
+        .all(|part| !part.is_empty() && !part.chars().any(char::is_lowercase));
+    if (word.contains('/') && !acronym_list) || word.contains('\\') {
         return true;
     }
     // SKILL.md, config.API.url — a dot binding two parts together. A trailing
@@ -1142,6 +1146,15 @@ mod tests {
     }
 
     #[test]
+    fn a_slash_joined_acronym_list_is_split_into_candidates() {
+        let e = Engine::in_memory().unwrap();
+        let out = e.analyze("the ZQX/ZQY split").unwrap();
+        assert_eq!(out.candidates, ["ZQX", "ZQY"]);
+        let out = e.analyze("open src/main.rs and /usr/ZQW").unwrap();
+        assert!(out.candidates.is_empty(), "got {:?}", out.candidates);
+    }
+
+    #[test]
     fn an_underscore_binds_a_name_together_rather_than_splitting_it() {
         let e = Engine::in_memory().unwrap();
         // Whole identifier is 18 characters, so it can't be acronym-shaped —
@@ -1465,6 +1478,21 @@ mod tests {
         assert!(expanded(&e, text).is_empty(), "{text}");
         // Sentence punctuation around a real mention still counts.
         assert_eq!(expanded(&e, "what's the (ID)?"), ["ID"]);
+    }
+
+    #[test]
+    fn a_slash_joined_acronym_list_expands_each_part() {
+        let e = engine_with(&[
+            ("TCP", "Transmission Control Protocol"),
+            ("IP", "Internet Protocol"),
+            ("CI", "Continuous Integration"),
+        ]);
+        assert_eq!(expanded(&e, "the TCP/IP stack"), ["TCP", "IP"]);
+        assert_eq!(expanded(&e, "fix the (CI/CD)."), ["CI"]);
+        // Paths stay skipped, whatever their casing.
+        for text in ["edit src/CI/main.rs", "ls /CI/TCP", "see TCP/ip"] {
+            assert!(expanded(&e, text).is_empty(), "{text}");
+        }
     }
 
     #[test]

@@ -86,7 +86,8 @@ casing: no lowercase letters (`KPI`, `S3`, `PB&J`). Acronyms are stored
 uppercase, so casing is the only thing that separates `US` from `us` or `IT`
 from `it`. Tokens inside an identifier or path (`src/ID/x.rs`, `config.ID.url`,
 `$ID`, `foo_ID`) are skipped, by the same rule that keeps them off the
-candidate list.
+candidate list. A slash between parts that have no lowercase (`CI/CD`,
+`TCP/IP`) joins a list of acronyms, not a path, so each part counts.
 
 ## Mining
 
