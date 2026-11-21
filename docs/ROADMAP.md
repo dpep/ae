@@ -156,12 +156,14 @@ commit.
       skipping a closed set of fillers (OKR = Objectives *and* Key Results) yet
       consuming one when it supplies a letter (POC = Point *of* Contact);
       content words must contribute (precision guard)
-- [x] cross-text mining — watched candidates (len ≥ 3) are mined from later
-      inputs that never mention them, so definitions accrue over time
-- [x] context vectors in confidence — per-candidate running-mean context
-      embedding (`candidate_contexts`); each mined phrase records the coherence
-      of its context (`coh_sum`); `confidence` blends recurrence share with mean
-      coherence, damped for sparse counts
+- [x] ~~cross-text mining~~ — retired: watched candidates were mined from
+      inputs that never mentioned them, and nearly every match was coincidence.
+      A text is now mined only for the acronyms it mentions (SPEC § Mining)
+- [x] ~~context vectors in confidence~~ — retired with cross-text mining: the
+      per-candidate running-mean context (`candidate_contexts`) is dropped on
+      open. `coh_sum` stays because older mined rows carry real coherence; new
+      sightings add 1.0 each, so `confidence` still blends recurrence share with
+      mean coherence, damped for sparse counts
 
 - [x] `ae define <ACR>` — add given expansions (multi), or pick interactively
       from suggestions via `fzf` (`--multi`) / numbered-prompt fallback
@@ -252,7 +254,7 @@ candidate).
 - [ ] cap/dedup `acronym_contexts` rows — mining a recurrence of a known
       expansion appends a context embedding every time (`add_context`), so the
       table grows unbounded for frequently-seen acronyms and `Engine::contextual`
-      scans all of them. Keep a running mean (like `candidate_contexts`) or cap
+      scans all of them. Keep a running mean or cap
       to the most recent/representative N, folded into consolidation
 - [ ] fzf preview pane showing where each candidate/phrase was seen
 

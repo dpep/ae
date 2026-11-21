@@ -111,6 +111,10 @@ releases are grouped at the end.
   `confidence` for an acronym with several meanings may see slightly lower
   scores. Scoring a sibling with no stored context no longer re-runs the model
   for its phrase on every hit.
+- Opening a dictionary drops the `candidate_contexts` table, which scored the
+  cross-text mining removed above. Nothing to do; an older `ae` recreates it.
+- `ae add ACR` with no expansion now says what watching means: expansions are
+  mined from text that mentions ACR. The JSON status is unchanged.
 
 ## 0.7.1 — 2026-11-12
 - When the daemon fails to analyze a line it now hangs up instead of replying

@@ -917,8 +917,7 @@ fn prune_clears_recorded_non_acronyms_but_not_declared_ones() {
             s.record_candidate("ZQX").unwrap();
         }
         for _ in 0..2 {
-            s.record_potential("TODO", "the other day only", 0.9)
-                .unwrap();
+            s.record_potential("TODO", "the other day only").unwrap();
         }
         s.declare_acronym("INFO").unwrap();
     }
@@ -946,7 +945,7 @@ fn stats_fixture(label: &str) -> PathBuf {
     s.add_entry("ZQ", "Zone Quota", "user").unwrap();
     s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
     s.add_entry("XY", "Red Balloon", "inline").unwrap();
-    s.record_potential("ZQX", "zebra queue xray", 0.9).unwrap();
+    s.record_potential("ZQX", "zebra queue xray").unwrap();
     for _ in 0..3 {
         s.record_candidate("ZQX").unwrap();
     }

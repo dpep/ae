@@ -389,8 +389,7 @@ impl Engine {
                     self.store.add_context(*id, &ctx)?;
                 }
                 None => {
-                    self.store
-                        .record_potential(&acronym, &phrase, MINED_COHERENCE)?;
+                    self.store.record_potential(&acronym, &phrase)?;
                 }
             }
         }
@@ -496,10 +495,6 @@ fn is_filler(word: &str) -> bool {
 /// How many words past the anchor a single match may span — bounds how many
 /// fillers we'll skip while spelling out an acronym.
 const MAX_MINE_SPAN: usize = 12;
-
-/// Coherence credited to a mined expansion. Mining only pairs a phrase with an
-/// acronym written in the same text, so every match gets the maximum.
-const MINED_COHERENCE: f32 = 1.0;
 
 /// A trie of acronyms keyed by their letters (punctuation stripped, so `PB&J`
 /// keys as `PBJ`), used to mine a whole text for *every* stored acronym's

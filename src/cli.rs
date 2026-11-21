@@ -722,7 +722,10 @@ fn run_add(
                 fmt,
                 quiet,
                 "watching",
-                &format!("now watching {} for expansions", acronym.to_uppercase()),
+                &format!(
+                    "now watching {}: expansions are mined from text that mentions it",
+                    acronym.to_uppercase()
+                ),
             ),
             Err(e) => fail(fmt, &format!("watch failed: {e}")),
         };

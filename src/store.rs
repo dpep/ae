@@ -22,7 +22,7 @@ PRAGMA synchronous = NORMAL;
 -- continuum: 'user' (a human asserted it — verified) > 'inline' (defined in the
 -- text) > 'mined' (speculative — initials match). `count`/`coh_sum` track the
 -- recurrence and context coherence behind a mined expansion (0 for confirmed
--- ones); a mined row that's later confirmed simply upgrades its source.
+-- ones; coherence is 1 per sighting now, lower only in older rows); a mined row that's later confirmed simply upgrades its source.
 CREATE TABLE IF NOT EXISTS acronym_dictionary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     acronym TEXT NOT NULL,
@@ -57,14 +57,6 @@ CREATE TABLE IF NOT EXISTS candidate_acronyms (
     source TEXT NOT NULL DEFAULT 'seen',
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Running-mean context embedding per candidate acronym: where it tends to be
--- used, so we can judge whether a mined phrase's context fits.
-CREATE TABLE IF NOT EXISTS candidate_contexts (
-    acronym TEXT PRIMARY KEY,
-    mean BLOB NOT NULL,
-    n INTEGER NOT NULL DEFAULT 0
 );
 
 -- Acronyms the user has muted. Kept in the DB but inert: excluded from the
@@ -234,6 +226,8 @@ impl Store {
             "ALTER TABLE candidate_acronyms ADD COLUMN source TEXT NOT NULL DEFAULT 'seen'",
             [],
         );
+        // Scored cross-text mining, which no longer exists.
+        conn.execute_batch("DROP TABLE IF EXISTS candidate_contexts")?;
         conn.execute_batch(&migrated_indexes())?;
         Ok(Self { conn })
     }
@@ -386,16 +380,12 @@ impl Store {
             "DELETE FROM acronym_dictionary WHERE acronym = ?1 AND source = 'mined'",
             params![acronym],
         )?;
-        self.conn.execute(
-            "DELETE FROM candidate_contexts WHERE acronym = ?1",
-            params![acronym],
-        )?;
         Ok(())
     }
 
     /// Mute `acronym`: keep any confirmed expansions but make it inert —
     /// excluded from the trie, mining, suggestions, and candidate surfacing. The
-    /// speculative trail (open candidate, mined rows, candidate context) is
+    /// speculative trail (open candidate, mined rows) is
     /// cleared so it goes quiet at once. Idempotent; case-insensitive.
     pub fn ignore_acronym(&self, acronym: &str) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
@@ -459,10 +449,11 @@ impl Store {
         )
     }
 
-    /// Record one sighting of a speculative (`mined`) expansion, with the vector
-    /// coherence of the context it was mined from (accumulated into `coh_sum`).
-    /// A pair that's already confirmed keeps its stronger source.
-    pub fn record_potential(&self, acronym: &str, expansion: &str, coherence: f32) -> Result<()> {
+    /// Record one sighting of a speculative (`mined`) expansion. Mining only
+    /// pairs a phrase with an acronym written in the same text, so each sighting
+    /// adds full coherence to `coh_sum`; rows from older cross-text mining keep
+    /// their lower sums. A pair that's already confirmed keeps its stronger source.
+    pub fn record_potential(&self, acronym: &str, expansion: &str) -> Result<()> {
         let acronym = acronym.trim().to_uppercase();
         let expansion = expansion.trim().to_lowercase();
         if acronym.is_empty() || expansion.is_empty() || self.is_ignored(&acronym)? {
@@ -471,10 +462,10 @@ impl Store {
         // last_seen is explicit: a column added by migration has no default.
         self.conn.execute(
             "INSERT INTO acronym_dictionary (acronym, expansion, source, count, coh_sum, last_seen)
-             VALUES (?1, ?2, 'mined', 1, ?3, CURRENT_TIMESTAMP)
+             VALUES (?1, ?2, 'mined', 1, 1.0, CURRENT_TIMESTAMP)
              ON CONFLICT(acronym, expansion) DO UPDATE
-               SET count = count + 1, coh_sum = coh_sum + ?3, last_seen = CURRENT_TIMESTAMP",
-            params![acronym, expansion, coherence as f64],
+               SET count = count + 1, coh_sum = coh_sum + 1.0, last_seen = CURRENT_TIMESTAMP",
+            params![acronym, expansion],
         )?;
         Ok(())
     }
@@ -637,8 +628,7 @@ impl Store {
 
     /// Drop noise candidates — seen once, with nothing mined, not declared, and
     /// not seen within the last `grace_secs` (so a just-seen token isn't yanked
-    /// out from under the user) — plus any orphaned context rows. Returns the
-    /// number of candidates removed.
+    /// out from under the user). Returns the number of candidates removed.
     pub fn prune_noise_candidates(&self, grace_secs: i64) -> Result<usize> {
         let cutoff = format!("-{} seconds", grace_secs.max(0));
         let n = self.conn.execute(
@@ -649,17 +639,12 @@ impl Store {
                    (SELECT acronym FROM acronym_dictionary WHERE source = 'mined')",
             params![cutoff],
         )?;
-        self.conn.execute(
-            "DELETE FROM candidate_contexts
-             WHERE acronym NOT IN (SELECT acronym FROM candidate_acronyms)",
-            [],
-        )?;
         Ok(n)
     }
 
     /// Drop undeclared candidates that aren't acronyms by [`crate::noise::is_noise`]
-    /// (recorded before that rule existed), with their mined expansions and
-    /// context. No grace period: the verdict is about the token, not its age.
+    /// (recorded before that rule existed), with their mined expansions. No
+    /// grace period: the verdict is about the token, not its age.
     /// Returns `(candidates, mined rows)` removed.
     pub fn prune_non_acronyms(
         &self,
@@ -815,8 +800,8 @@ impl Store {
         }
         // 3. Drop mined rows that never recurred or score below the floor,
         //    sparing recently seen ones. Recurrence has to be checked on its
-        //    own: coherence defaults to 1.0 without history, which lifts a
-        //    seen-once row above any sane floor.
+        //    own: a mined row's coherence is 1.0, which lifts a seen-once row
+        //    above any sane floor.
         let recent = self.recent_potentials(grace_secs)?;
         let all = self.all_potentials()?;
         let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -875,52 +860,6 @@ impl Store {
             "INSERT INTO meta (key, value) VALUES ('last_consolidated', datetime('now'))
              ON CONFLICT(key) DO UPDATE SET value = datetime('now')",
             [],
-        )?;
-        Ok(())
-    }
-
-    /// The running-mean context embedding for a candidate acronym, if any.
-    pub fn candidate_context_mean(&self, acronym: &str) -> Result<Option<Vec<f32>>> {
-        let acronym = acronym.trim().to_uppercase();
-        let blob: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT mean FROM candidate_contexts WHERE acronym = ?1",
-                params![acronym],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(blob.map(|b| decode(&b)))
-    }
-
-    /// Fold one context vector into a candidate acronym's running mean.
-    pub fn update_candidate_context(&self, acronym: &str, vector: &[f32]) -> Result<()> {
-        let acronym = acronym.trim().to_uppercase();
-        let current: Option<(Vec<u8>, i64)> = self
-            .conn
-            .query_row(
-                "SELECT mean, n FROM candidate_contexts WHERE acronym = ?1",
-                params![acronym],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-
-        let (mean, n) = match current {
-            Some((blob, n)) => {
-                let mut mean = decode(&blob);
-                let n = n as f32;
-                // Incremental mean: mean += (x - mean) / (n + 1).
-                for (m, &x) in mean.iter_mut().zip(vector) {
-                    *m += (x - *m) / (n + 1.0);
-                }
-                (mean, n as i64 + 1)
-            }
-            None => (vector.to_vec(), 1),
-        };
-        self.conn.execute(
-            "INSERT INTO candidate_contexts (acronym, mean, n) VALUES (?1, ?2, ?3)
-             ON CONFLICT(acronym) DO UPDATE SET mean = ?2, n = ?3",
-            params![acronym, encode(&mean), n],
         )?;
         Ok(())
     }
@@ -1148,7 +1087,6 @@ impl Store {
         self.conn.execute_batch(
             "DELETE FROM acronym_contexts;
              DELETE FROM acronym_dictionary;
-             DELETE FROM candidate_contexts;
              DELETE FROM candidate_acronyms;
              DELETE FROM ignored_acronyms;
              DELETE FROM meta;",
@@ -1203,7 +1141,9 @@ pub fn source_validity(source: &str) -> f32 {
 /// Blend recurrence and coherence into a `[0, 1]` confidence for a mined
 /// expansion: `share` (its fraction of the acronym's sightings) and `mean_coh`
 /// (average context coherence) weighted equally, then damped so a lone sighting
-/// can't reach certainty. Shared by `suggest`/`prune` and the amortized GC.
+/// can't reach certainty. New rows are fully coherent; coherence still sinks
+/// rows left by older cross-text mining. Shared by `suggest`/`prune` and the
+/// amortized GC.
 pub fn confidence(count: i64, coh_sum: f64, total: i64) -> f32 {
     let count = count.max(1) as f32;
     let share = count / total.max(1) as f32;
@@ -1400,12 +1340,9 @@ mod tests {
     #[test]
     fn dedup_merges_prefix_compatible_expansions() {
         let s = Store::open_in_memory().unwrap();
-        s.record_potential("MVP", "min viable product", 1.0)
-            .unwrap();
-        s.record_potential("MVP", "minimum viable product", 1.0)
-            .unwrap();
-        s.record_potential("MVP", "most valuable player", 1.0)
-            .unwrap();
+        s.record_potential("MVP", "min viable product").unwrap();
+        s.record_potential("MVP", "minimum viable product").unwrap();
+        s.record_potential("MVP", "most valuable player").unwrap();
 
         assert_eq!(s.dedup_potentials("MVP").unwrap(), 1); // two folded into one
         let pots = s.potentials_for("MVP").unwrap();
@@ -1433,6 +1370,7 @@ mod tests {
                  CREATE TABLE candidate_acronyms (
                      acronym TEXT PRIMARY KEY,
                      count INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE candidate_contexts (acronym TEXT PRIMARY KEY, mean BLOB);
                  INSERT INTO acronym_dictionary (acronym, expansion)
                      VALUES ('KPI', 'Key Performance Indicator');",
             )
@@ -1440,13 +1378,19 @@ mod tests {
         let opened = Store::open(&path).and_then(|s| {
             // ADD COLUMN can't carry a CURRENT_TIMESTAMP default, so a new row
             // must stamp last_seen itself or it never counts as recent.
-            s.record_potential("ZQX", "zebra quilt exchange", 1.0)?;
-            Ok((s.count()?, s.recent_potentials(3600)?))
+            s.record_potential("ZQX", "zebra quilt exchange")?;
+            let stale: bool = s.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'candidate_contexts')",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((s.count()?, s.recent_potentials(3600)?, stale))
         });
         let _ = std::fs::remove_file(&path);
-        let (count, recent) = opened.unwrap();
+        let (count, recent, stale) = opened.unwrap();
         assert_eq!(count, 1);
         assert!(recent.contains(&("ZQX".into(), "zebra quilt exchange".into())));
+        assert!(!stale, "the retired candidate_contexts table is dropped");
     }
 
     #[test]
@@ -1521,10 +1465,8 @@ mod tests {
     #[test]
     fn dedup_merges_a_misspelled_variant() {
         let s = Store::open_in_memory().unwrap();
-        s.record_potential("MVP", "minimum viable product", 1.0)
-            .unwrap();
-        s.record_potential("MVP", "minimum viable prodcut", 1.0)
-            .unwrap(); // typo
+        s.record_potential("MVP", "minimum viable product").unwrap();
+        s.record_potential("MVP", "minimum viable prodcut").unwrap(); // typo
         assert_eq!(s.dedup_potentials("MVP").unwrap(), 1);
         assert_eq!(s.potentials_for("MVP").unwrap().len(), 1);
     }
@@ -1561,10 +1503,8 @@ mod tests {
     #[test]
     fn dedup_preserves_age_so_stale_rows_stay_prunable() {
         let s = Store::open_in_memory().unwrap();
-        s.record_potential("MVP", "min viable product", 1.0)
-            .unwrap();
-        s.record_potential("MVP", "minimum viable product", 1.0)
-            .unwrap();
+        s.record_potential("MVP", "min viable product").unwrap();
+        s.record_potential("MVP", "minimum viable product").unwrap();
         // Age the mined rows two hours into the past.
         s.conn
             .execute(
@@ -1577,7 +1517,7 @@ mod tests {
         // The merged row kept the old timestamp → not recent within an hour.
         assert!(s.recent_potentials(3600).unwrap().is_empty());
         // A freshly recorded one is recent.
-        s.record_potential("KPI", "key performance indicator", 1.0)
+        s.record_potential("KPI", "key performance indicator")
             .unwrap();
         assert!(
             s.recent_potentials(3600)
@@ -1589,10 +1529,8 @@ mod tests {
     #[test]
     fn spell_correction_preserves_age_and_merges_counts() {
         let s = Store::open_in_memory().unwrap();
-        s.record_potential("MVP", "minimum viabel product", 1.0)
-            .unwrap();
-        s.record_potential("MVP", "minimum viable product", 1.0)
-            .unwrap();
+        s.record_potential("MVP", "minimum viabel product").unwrap();
+        s.record_potential("MVP", "minimum viable product").unwrap();
         s.conn
             .execute(
                 "UPDATE acronym_dictionary SET last_seen = datetime('now', '-2 hours')
@@ -1637,8 +1575,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.record_candidate("XX").unwrap(); // seen once, no potentials → noise
         s.record_candidate("MVP").unwrap();
-        s.record_potential("MVP", "minimum viable product", 1.0)
-            .unwrap();
+        s.record_potential("MVP", "minimum viable product").unwrap();
         assert_eq!(s.prune_noise_candidates(0).unwrap(), 1);
         let acrs: Vec<String> = s
             .candidates()
@@ -1659,9 +1596,9 @@ mod tests {
             s.record_candidate("V1").unwrap();
             s.record_candidate("ZQX").unwrap();
         }
-        s.record_potential("WHERE", "we have every real error", 0.9)
+        s.record_potential("WHERE", "we have every real error")
             .unwrap();
-        s.record_potential("ZQX", "zebra queue xray", 0.9).unwrap();
+        s.record_potential("ZQX", "zebra queue xray").unwrap();
         s.declare_acronym("POST").unwrap(); // declared: kept though it's a word
 
         assert_eq!(s.prune_non_acronyms(Some(&words)).unwrap(), (2, 1));
@@ -1713,7 +1650,7 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.ignore_acronym("XX").unwrap();
         s.record_candidate("XX").unwrap(); // no-op while ignored
-        s.record_potential("XX", "extra example", 1.0).unwrap(); // no-op
+        s.record_potential("XX", "extra example").unwrap(); // no-op
         assert!(s.candidates().unwrap().iter().all(|(a, _)| a != "XX"));
         assert!(s.potentials_for("XX").unwrap().is_empty());
         assert!(!s.watch_list().unwrap().contains(&"XX".to_string()));
@@ -1726,8 +1663,7 @@ mod tests {
         s.add_entry("MVP", "Minimum Viable Product", "user")
             .unwrap();
         s.record_candidate("MVP").unwrap();
-        s.record_potential("MVP", "most valuable player", 1.0)
-            .unwrap();
+        s.record_potential("MVP", "most valuable player").unwrap();
         s.ignore_acronym("MVP").unwrap();
         // Speculative trail gone...
         assert!(s.potentials_for("MVP").unwrap().is_empty());
@@ -1848,7 +1784,7 @@ mod tests {
 
         // A mined (lowercased) row is confirmed in place, not duplicated.
         let s = Store::open_in_memory().unwrap();
-        s.record_potential("WQ", "widget quorum", 1.0).unwrap();
+        s.record_potential("WQ", "widget quorum").unwrap();
         s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
         assert_eq!(rows_of(&s, "WQ"), row("Widget Quorum", "inline"));
     }
@@ -1861,7 +1797,7 @@ mod tests {
         // alongside the user one.
         let s = Store::open_in_memory().unwrap();
         let id = s.add_entry("BK", "Buildkite", "user").unwrap();
-        s.record_potential("BK", "buildkite", 1.0).unwrap();
+        s.record_potential("BK", "buildkite").unwrap();
         assert_eq!(s.add_entry("BK", "buildkite", "user").unwrap(), id);
         assert_eq!(
             s.expansions_for("BK").unwrap(),
@@ -1872,7 +1808,7 @@ mod tests {
         // mined row instead of colliding with it.
         let s = Store::open_in_memory().unwrap();
         let id = s.add_entry("BK", "Buildkite", "inline").unwrap();
-        s.record_potential("BK", "buildkite", 1.0).unwrap();
+        s.record_potential("BK", "buildkite").unwrap();
         s.add_context(id, &[0.0; MRL_DIMS]).unwrap();
         assert_eq!(s.add_entry("BK", "buildkite", "user").unwrap(), id);
         assert_eq!(rows_of(&s, "BK"), vec![row("buildkite", "user")]);
@@ -1907,7 +1843,7 @@ mod tests {
         let gone = s.add_entry("ZQ", "Zebra Queue", "inline").unwrap();
         s.add_context(kept, &v).unwrap();
         s.add_context(gone, &v).unwrap();
-        s.record_potential("ZQ", "zany quokka", 1.0).unwrap();
+        s.record_potential("ZQ", "zany quokka").unwrap();
         s.add_entry("WQ", "Widget Quorum", "inline").unwrap();
 
         // Scoped: inline and mined rows of ZQ go; ZQ's user row and WQ stay.
